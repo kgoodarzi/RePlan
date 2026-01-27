@@ -1,0 +1,50 @@
+---
+description: Require Beads issues to be prioritized after any changes
+alwaysApply: true
+---
+
+# Beads Prioritization
+
+Whenever the `.beads/issues.jsonl` file is modified, issues MUST be re-prioritized.
+
+## Prioritization Order
+
+Issues should be ordered by:
+
+1. **Priority** (high → medium → low)
+2. **Dependencies** (blockers before dependents)
+3. **Impact** (workflow-critical before nice-to-have)
+
+## Priority Criteria
+
+### High Priority
+- Workflow blockers (user cannot complete core tasks)
+- Security vulnerabilities
+- Data loss risks
+- Features required for MVP
+
+### Medium Priority
+- Significant workflow improvements
+- Performance optimizations
+- Important UX enhancements
+
+### Low Priority
+- Nice-to-have features
+- Minor UX polish
+- Future vision items
+
+## After Modifying Issues
+
+1. Review all open issues
+2. Ensure high-priority items are listed first
+3. Group related issues together
+4. Update priorities if circumstances changed
+5. Consider dependencies between issues
+
+## Dependency Tracking
+
+Add `depends_on` field when issues have dependencies:
+
+```json
+{"id": "REPLAN-XXX", ..., "depends_on": ["REPLAN-YYY"]}
+```

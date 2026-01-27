@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "replan"
+version = "6.0.0"
+description = "Technical Drawing Annotation and Segmentation Tool"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "RePlan Team"}
+]
+keywords = ["segmentation", "annotation", "technical-drawings", "model-aircraft", "plans"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "opencv-python>=4.9.0",
+    "opencv-contrib-python>=4.9.0",
+    "Pillow>=10.2.0",
+    "numpy>=1.26.0",
+    "scikit-image>=0.22.0",
+    "pdf2image>=1.17.0",
+    "PyMuPDF>=1.23.0",
+    "pytesseract>=0.3.10",
+    "rectpack>=0.2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=24.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+    "beads>=0.1.0",
+]
+
+[project.scripts]
+replan = "replan.desktop:main"
+
+[project.urls]
+Homepage = "https://github.com/yourorg/replan"
+Documentation = "https://github.com/yourorg/replan#readme"
+Repository = "https://github.com/yourorg/replan"
+Issues = "https://github.com/yourorg/replan/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+branch = true
+source = ["src/replan"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

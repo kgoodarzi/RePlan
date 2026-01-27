@@ -1,0 +1,39 @@
+---
+description: Require all identified issues and gaps to be tracked in Beads
+alwaysApply: true
+---
+
+# Beads Issue Tracking
+
+All identified issues, bugs, gaps, and feature requests MUST be added to Beads.
+
+## When to Add Issues
+
+- When reviewing code and finding gaps or missing features
+- When identifying bugs during testing or code review
+- When planning work and discovering new requirements
+- When the user reports a problem or requests a feature
+
+## How to Add Issues
+
+Add issues to `.beads/issues.jsonl` with this format:
+
+```json
+{"id": "REPLAN-XXX", "title": "Brief title", "description": "Detailed description", "priority": "high|medium|low", "status": "open", "labels": ["label1", "label2"], "created": "YYYY-MM-DD"}
+```
+
+## Required Fields
+
+- `id`: Sequential ID (REPLAN-001, REPLAN-002, etc.)
+- `title`: Brief, descriptive title
+- `description`: What needs to be done and why
+- `priority`: "high" (blockers), "medium" (important), "low" (nice-to-have)
+- `status`: "open", "in_progress", "closed"
+- `labels`: Relevant tags (feature, bug, performance, testing, etc.)
+- `created`: Date in YYYY-MM-DD format
+
+## Priority Guidelines
+
+- **high**: Workflow blockers, critical bugs, security issues
+- **medium**: Important features, significant improvements
+- **low**: Nice-to-have features, minor enhancements

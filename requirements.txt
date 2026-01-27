@@ -1,0 +1,30 @@
+# RePlan Requirements
+# ===================
+# Install with: pip install -r requirements.txt
+
+# Image Processing
+opencv-python>=4.9.0
+opencv-contrib-python>=4.9.0
+Pillow>=10.2.0
+numpy>=1.26.0
+scikit-image>=0.22.0
+
+# PDF Processing
+pdf2image>=1.17.0
+PyMuPDF>=1.23.0
+
+# OCR
+pytesseract>=0.3.10
+
+# Nesting/Packing
+rectpack>=0.2.2
+
+# Development
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=24.1.0
+ruff>=0.1.0
+mypy>=1.8.0
+
+# Beads Issue Tracker (for AI-assisted development)
+beads>=0.1.0

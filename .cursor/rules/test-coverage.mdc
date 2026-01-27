@@ -1,0 +1,54 @@
+---
+description: Require minimum 90% test and branch coverage
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Test Coverage Requirements
+
+All Python code MUST maintain minimum 90% test coverage.
+
+## Coverage Requirements
+
+| Metric | Minimum |
+|--------|---------|
+| Line coverage | 90% |
+| Branch coverage | 90% |
+
+## When Writing Code
+
+1. **Write tests alongside code** - Every new function/class needs tests
+2. **Cover edge cases** - Test boundary conditions, error paths, empty inputs
+3. **Test all branches** - Ensure if/else, try/except, and loops are fully covered
+
+## Running Coverage
+
+```bash
+pytest --cov=src/replan --cov-branch --cov-report=term-missing --cov-fail-under=90
+```
+
+## Coverage Configuration
+
+Add to `pyproject.toml`:
+
+```toml
+[tool.coverage.run]
+branch = true
+source = ["src/replan"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+```
+
+## Exceptions
+
+Use `# pragma: no cover` sparingly for:
+- Platform-specific code that can't be tested in CI
+- Abstract methods meant to be overridden
+- Debug/development-only code
