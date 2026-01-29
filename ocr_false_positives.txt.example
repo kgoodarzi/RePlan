@@ -1,0 +1,14 @@
+# OCR False Positive Patterns
+# 
+# This file contains patterns that should be filtered out as false positives.
+# One pattern per line. Lines starting with # are comments.
+#
+# Patterns can be:
+# - Exact text matches (case-insensitive): HL
+# - Regex patterns: ^[oO]{2,}$  (matches repeated 'o' characters)
+#
+# Examples:
+# HL
+# LH
+# ^[oO]{2,}$  # Repeated 'o' characters (holes)
+# ^[AY]{2,}$  # AY pattern (fuselage)

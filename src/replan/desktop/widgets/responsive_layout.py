@@ -322,21 +322,60 @@ class ResizableLayout(tk.Frame):
             
             # Bind to paned window sash movement to track panel width changes
             def on_sash_moved(event=None):
-                if right_panels:
-                    # Get current width of right panel frame
+                """Save sidebar and center widths when sash is moved."""
+                try:
+                    paned_width = self.paned.winfo_width()
+                    if paned_width <= 0:
+                        return
+                    
+                    panes = self.paned.panes()
+                    if len(panes) < 2:
+                        return
+                    
+                    # Save sidebar width (sash 0)
                     try:
-                        right_width = self.right_panel_frame.winfo_width()
-                        if right_width > 0:
-                            self.settings.tree_width = right_width
-                            # Save settings immediately
-                            from replan.desktop.config import save_settings
-                            save_settings(self.settings)
-                    except:
-                        pass
+                        sash0_pos = self.paned.sashpos(0)
+                        if sash0_pos > 50:
+                            self.settings.sidebar_width = sash0_pos
+                    except (tk.TclError, AttributeError, IndexError):
+                        try:
+                            sidebar_width = self.left_panel_frame.winfo_width()
+                            if sidebar_width > 50:
+                                self.settings.sidebar_width = sidebar_width
+                        except:
+                            pass
+                    
+                    # Save center width (sash 1 - sash 0) and object viewer width
+                    if len(panes) >= 3:
+                        try:
+                            sash0_pos = self.paned.sashpos(0)
+                            sash1_pos = self.paned.sashpos(1)
+                            center_width = sash1_pos - sash0_pos
+                            object_viewer_width = paned_width - sash1_pos
+                            
+                            if center_width > 100 and object_viewer_width > 50:
+                                self.settings.tree_width = object_viewer_width
+                                # Save settings immediately
+                                from replan.desktop.config import save_settings
+                                save_settings(self.settings)
+                        except (tk.TclError, AttributeError, IndexError):
+                            # Fallback to winfo_width
+                            try:
+                                object_viewer_width = self.right_panel_frame.winfo_width()
+                                if object_viewer_width > 50:
+                                    self.settings.tree_width = object_viewer_width
+                                    from replan.desktop.config import save_settings
+                                    save_settings(self.settings)
+                            except:
+                                pass
+                except Exception as e:
+                    pass
             
-            # Bind to paned window configure event to track resize
+            # Bind to paned window sash movement to track resize
             self.paned.bind('<ButtonRelease-1>', on_sash_moved)
             self.paned.bind('<B1-Motion>', lambda e: self.after_idle(on_sash_moved))
+            # Also bind to configure event in case window is resized
+            self.paned.bind('<Configure>', lambda e: self.after_idle(on_sash_moved))
                 
         # Set initial active panel
         if self.panels:

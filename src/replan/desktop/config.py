@@ -86,6 +86,11 @@ class AppSettings:
     auto_detect_text: bool = False  # Automatically detect text regions when pages are loaded
     auto_detect_hatch: bool = False  # Automatically detect hatching regions when pages are loaded
     
+    # OCR settings
+    ocr_backend: str = "tesseract"  # OCR backend: "tesseract", "aws", "google", "azure", "openai"
+    aws_profile: str = ""  # AWS profile name (empty = use default credentials)
+    aws_region: str = "us-east-1"  # AWS region for Textract
+    
     def add_recent_file(self, path: str):
         """Add a file to recent files list."""
         if path in self.recent_files:

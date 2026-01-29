@@ -51,6 +51,11 @@ class SettingsDialog(BaseDialog):
             "auto_collapse_panels": self.settings.auto_collapse_panels,
             "auto_detect_text": self.settings.auto_detect_text,
             "auto_detect_hatch": self.settings.auto_detect_hatch,
+            
+            # OCR
+            "ocr_backend": getattr(self.settings, 'ocr_backend', 'tesseract'),
+            "aws_profile": getattr(self.settings, 'aws_profile', ''),
+            "aws_region": getattr(self.settings, 'aws_region', 'us-east-1'),
         }
     
     def _setup_ui(self):
@@ -67,6 +72,7 @@ class SettingsDialog(BaseDialog):
         self._create_tools_tab()
         self._create_display_tab()
         self._create_behavior_tab()
+        self._create_ocr_tab()
         
         # Button frame
         btn_frame = tk.Frame(self, bg=t["bg"])
@@ -228,6 +234,69 @@ class SettingsDialog(BaseDialog):
         
         tk.Label(frame, text="When enabled, panels will automatically collapse\nwhen the window is resized to a smaller size.",
                 bg=t["bg"], fg=t["fg_subtle"], font=("Segoe UI", 9), justify=tk.LEFT).pack(anchor=tk.W, padx=16)
+        
+        self._add_section_header(frame, "Auto-Detection")
+        
+        # Auto detect text
+        self.auto_detect_text_var = tk.BooleanVar(value=self.values["auto_detect_text"])
+        ttk.Checkbutton(frame, text="Automatically detect text regions when pages are loaded",
+                       variable=self.auto_detect_text_var, command=self._mark_modified).pack(anchor=tk.W, padx=16, pady=8)
+        
+        # Auto detect hatch
+        self.auto_detect_hatch_var = tk.BooleanVar(value=self.values["auto_detect_hatch"])
+        ttk.Checkbutton(frame, text="Automatically detect hatching regions when pages are loaded",
+                       variable=self.auto_detect_hatch_var, command=self._mark_modified).pack(anchor=tk.W, padx=16, pady=8)
+    
+    def _create_ocr_tab(self):
+        """Create OCR settings tab."""
+        t = self.theme
+        frame = tk.Frame(self.notebook, bg=t["bg"])
+        self.notebook.add(frame, text="OCR")
+        
+        self._add_section_header(frame, "Backend Selection")
+        
+        # OCR Backend
+        backend_frame = tk.Frame(frame, bg=t["bg"])
+        backend_frame.pack(fill=tk.X, padx=16, pady=8)
+        
+        tk.Label(backend_frame, text="OCR Backend:", bg=t["bg"], fg=t["fg"]).pack(side=tk.LEFT)
+        self.ocr_backend_var = tk.StringVar(value=self.values["ocr_backend"])
+        backend_combo = ttk.Combobox(backend_frame, textvariable=self.ocr_backend_var,
+                                     values=["tesseract", "aws", "google", "azure", "openai"],
+                                     state="readonly", width=20)
+        backend_combo.pack(side=tk.RIGHT)
+        backend_combo.bind("<<ComboboxSelected>>", lambda e: self._mark_modified())
+        
+        tk.Label(frame, text="Select the OCR engine to use for text detection.",
+                bg=t["bg"], fg=t["fg_subtle"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=16)
+        
+        self._add_section_header(frame, "AWS Configuration")
+        
+        # AWS Profile
+        profile_frame = tk.Frame(frame, bg=t["bg"])
+        profile_frame.pack(fill=tk.X, padx=16, pady=8)
+        
+        tk.Label(profile_frame, text="AWS Profile:", bg=t["bg"], fg=t["fg"]).pack(side=tk.LEFT)
+        self.aws_profile_var = tk.StringVar(value=self.values["aws_profile"])
+        profile_entry = ttk.Entry(profile_frame, textvariable=self.aws_profile_var, width=25)
+        profile_entry.pack(side=tk.RIGHT)
+        profile_entry.bind("<KeyRelease>", lambda e: self._mark_modified())
+        
+        tk.Label(frame, text="AWS profile name from ~/.aws/credentials (leave empty for default)",
+                bg=t["bg"], fg=t["fg_subtle"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=16)
+        
+        # AWS Region
+        region_frame = tk.Frame(frame, bg=t["bg"])
+        region_frame.pack(fill=tk.X, padx=16, pady=8)
+        
+        tk.Label(region_frame, text="AWS Region:", bg=t["bg"], fg=t["fg"]).pack(side=tk.LEFT)
+        self.aws_region_var = tk.StringVar(value=self.values["aws_region"])
+        region_entry = ttk.Entry(region_frame, textvariable=self.aws_region_var, width=25)
+        region_entry.pack(side=tk.RIGHT)
+        region_entry.bind("<KeyRelease>", lambda e: self._mark_modified())
+        
+        tk.Label(frame, text="AWS region for Textract (e.g., us-east-1, eu-west-1)",
+                bg=t["bg"], fg=t["fg_subtle"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=16)
     
     def _add_section_header(self, parent, text: str):
         """Add a section header."""
@@ -263,6 +332,14 @@ class SettingsDialog(BaseDialog):
         self.auto_detect_text_var.set(defaults.auto_detect_text)
         self.auto_detect_hatch_var.set(defaults.auto_detect_hatch)
         
+        # OCR defaults
+        if hasattr(defaults, 'ocr_backend'):
+            self.ocr_backend_var.set(defaults.ocr_backend)
+        if hasattr(defaults, 'aws_profile'):
+            self.aws_profile_var.set(defaults.aws_profile)
+        if hasattr(defaults, 'aws_region'):
+            self.aws_region_var.set(defaults.aws_region)
+        
         self.modified = True
     
     def _on_save(self):
@@ -282,6 +359,14 @@ class SettingsDialog(BaseDialog):
         self.settings.auto_collapse_panels = self.auto_collapse_var.get()
         self.settings.auto_detect_text = self.auto_detect_text_var.get()
         self.settings.auto_detect_hatch = self.auto_detect_hatch_var.get()
+        
+        # OCR settings
+        if hasattr(self.settings, 'ocr_backend'):
+            self.settings.ocr_backend = self.ocr_backend_var.get()
+        if hasattr(self.settings, 'aws_profile'):
+            self.settings.aws_profile = self.aws_profile_var.get()
+        if hasattr(self.settings, 'aws_region'):
+            self.settings.aws_region = self.aws_region_var.get()
         
         self.result = self.settings
         

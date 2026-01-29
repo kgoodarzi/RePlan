@@ -526,6 +526,10 @@ class WorkspaceManager:
                         print(f"Warning: Skipping element {elem_data.get('element_id', 'unknown')} - memory allocation failed")
                         continue
                 
+                anchor_offset = elem_data.get("label_anchor_offset")
+                if anchor_offset is not None:
+                    anchor_offset = tuple(anchor_offset)
+                
                 elem = SegmentElement(
                     element_id=elem_data.get("element_id", ""),
                     category=category,
@@ -534,6 +538,7 @@ class WorkspaceManager:
                     mask=mask,
                     color=color,
                     label_position=elem_data.get("label_position", "center"),
+                    label_anchor_offset=anchor_offset,
                 )
                 elements.append(elem)
             

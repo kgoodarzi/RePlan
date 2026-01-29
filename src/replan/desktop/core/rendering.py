@@ -327,11 +327,6 @@ class Renderer:
                 continue
             
             for inst_idx, inst in enumerate(obj.instances):
-                centroid = self._calculate_group_centroid(inst.elements)
-                if centroid is None:
-                    continue
-                
-                cx, cy = centroid
                 label = f"{obj.name}[{inst_idx + 1}]" if len(obj.instances) > 1 else obj.name
                 
                 # Use FONT_HERSHEY_SIMPLEX for clean text
@@ -340,8 +335,24 @@ class Renderer:
                 thickness = 1
                 
                 (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
-                lx = int(cx - text_w // 2)
-                ly = int(cy + text_h // 2)
+                
+                # Determine label position: use first element's label position/offset if available
+                label_pos = None
+                if inst.elements:
+                    first_elem = inst.elements[0]
+                    label_pos = first_elem.get_label_position()
+                
+                # Fallback to centroid if no label position available
+                if label_pos is None:
+                    centroid = self._calculate_group_centroid(inst.elements)
+                    if centroid is None:
+                        continue
+                    cx, cy = centroid
+                    label_pos = (cx, cy)
+                
+                # Calculate label text position (anchor point is center of text)
+                lx = int(label_pos[0] - text_w // 2)
+                ly = int(label_pos[1] + text_h // 2)
                 
                 # Draw light shadow (white/light gray for contrast on white paper)
                 shadow_color = (220, 220, 220, 255)  # Light gray shadow
@@ -532,25 +543,32 @@ class Renderer:
                     label_color = (min(255, b + 100), min(255, g + 100), min(255, r + 100))
             
             for inst_idx, inst in enumerate(obj.instances):
-                # Calculate center of gravity for all elements in this instance
-                centroid = self._calculate_group_centroid(inst.elements)
-                if centroid is None:
-                    continue
-                
-                cx, cy = centroid
-                
                 # Format label - one per instance
                 if len(obj.instances) > 1:
                     label = f"{obj.name}[{inst_idx + 1}]"
                 else:
                     label = obj.name
                 
-                # Get text size for centering
+                # Get text size for positioning
                 (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
                 
-                # Center the label on the centroid
-                lx = int(cx - text_w // 2)
-                ly = int(cy + text_h // 2)
+                # Determine label position: use first element's label position/offset if available
+                label_pos = None
+                if inst.elements:
+                    first_elem = inst.elements[0]
+                    label_pos = first_elem.get_label_position()
+                
+                # Fallback to centroid if no label position available
+                if label_pos is None:
+                    centroid = self._calculate_group_centroid(inst.elements)
+                    if centroid is None:
+                        continue
+                    cx, cy = centroid
+                    label_pos = (cx, cy)
+                
+                # Calculate label text position (anchor point is center of text)
+                lx = int(label_pos[0] - text_w // 2)
+                ly = int(label_pos[1] + text_h // 2)
                 
                 # Draw soft drop shadow (multiple offsets)
                 shadow_color = (40, 40, 40)

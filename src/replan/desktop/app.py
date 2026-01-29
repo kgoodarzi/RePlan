@@ -138,6 +138,11 @@ class RePlanApp:
         self.show_labels = True
         self.label_position = "center"
         
+        # Label anchor drag-and-drop state
+        self.is_moving_label_anchor = False
+        self.label_anchor_drag_element = None  # Element being dragged
+        self.label_anchor_drag_start = None  # Starting image coordinates
+
         # Workspace state
         self.workspace_file: Optional[str] = None
         self.workspace_modified = False
@@ -435,6 +440,7 @@ class RePlanApp:
         tools_menu.add_command(label="Nest Parts on Sheets...", command=self._show_nesting_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="Scan for Labels...", command=self._scan_for_labels)
+        tools_menu.add_command(label="Analyze with AWS Textract...", command=self._analyze_with_textract)
     
     def _setup_tools_panel(self):
         """Setup the tools panel (left sidebar)."""
@@ -463,20 +469,29 @@ class RePlanApp:
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Bind mousewheel only when mouse is over this canvas
+        # Bind mousewheel directly to canvas and frame (not bind_all to avoid focus issues)
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            # Only scroll if Ctrl is not pressed (Ctrl+mouse wheel is for zoom)
+            if event.state & 0x4 == 0:  # Check if Control key is not pressed
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
-        def _bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        def _bind_mousewheel_recursive(widget):
+            """Recursively bind mousewheel to widget and all its children."""
+            try:
+                widget.bind("<MouseWheel>", _on_mousewheel)
+                for child in widget.winfo_children():
+                    _bind_mousewheel_recursive(child)
+            except:
+                pass
         
-        def _unbind_mousewheel(event):
-            canvas.unbind_all("<MouseWheel>")
+        # Bind directly to canvas and frame widgets (not bind_all to avoid focus issues)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        _bind_mousewheel_recursive(frame)
         
-        canvas.bind("<Enter>", _bind_mousewheel)
-        canvas.bind("<Leave>", _unbind_mousewheel)
-        frame.bind("<Enter>", _bind_mousewheel)
-        frame.bind("<Leave>", _unbind_mousewheel)
+        # Re-bind when frame content changes (for dynamically added widgets)
+        def _on_frame_configure(event):
+            _bind_mousewheel_recursive(frame)
+        frame.bind("<Configure>", _on_frame_configure)
         
         # Mode section
         mode_section = CollapsibleFrame(frame, "Selection Mode", theme=t)
@@ -1523,13 +1538,16 @@ class RePlanApp:
             return
         
         # Group nearby text regions into logical textboxes/notes
-        # Uses improved algorithm with stricter overlap requirements to avoid over-grouping
+        # Balance between grouping fragmented text and preventing over-grouping
         from replan.desktop.utils.ocr import group_text_regions
+        h, w = page.original_image.shape[:2]
         new_regions = group_text_regions(new_regions, 
-                                        max_horizontal_gap=0.25, 
-                                        max_vertical_gap=0.4, 
-                                        min_group_size=2,
-                                        max_group_size=10)
+                                        max_horizontal_gap=0.3,  # Moderate: 30% of text height (for fragmented text)
+                                        max_vertical_gap=0.4,  # Moderate: 40% of text height (for multi-line text)
+                                        min_group_size=1,  # Allow single words to be grouped if nearby
+                                        max_group_size=15,  # Reduced to prevent over-grouping
+                                        max_group_width=0.3,  # Max 30% of image width (slightly more lenient)
+                                        max_group_height=0.2)  # Max 20% of image height
         
         # Get existing region IDs to avoid duplicates
         existing_ids = set()
@@ -1614,13 +1632,16 @@ class RePlanApp:
             return
         
         # Group nearby text regions into logical textboxes/notes
-        # Uses improved algorithm with stricter overlap requirements to avoid over-grouping
+        # Balance between grouping fragmented text and preventing over-grouping
         from replan.desktop.utils.ocr import group_text_regions
+        h, w = page.original_image.shape[:2]
         new_regions = group_text_regions(new_regions, 
-                                        max_horizontal_gap=0.25, 
-                                        max_vertical_gap=0.4, 
-                                        min_group_size=2,
-                                        max_group_size=10)
+                                        max_horizontal_gap=0.3,  # Moderate: 30% of text height (for fragmented text)
+                                        max_vertical_gap=0.4,  # Moderate: 40% of text height (for multi-line text)
+                                        min_group_size=1,  # Allow single words to be grouped if nearby
+                                        max_group_size=15,  # Reduced to prevent over-grouping
+                                        max_group_width=0.3,  # Max 30% of image width (slightly more lenient)
+                                        max_group_height=0.2)  # Max 20% of image height
         
         # Get existing region IDs to avoid duplicates
         existing_ids = set()
@@ -1652,6 +1673,221 @@ class RePlanApp:
         self.renderer.invalidate_cache()
         self._update_display()
         self.status_var.set(f"OCR complete: {added_count} new text regions added, {objects_added} objects created (total: {len(page.auto_text_regions)})")
+    
+    def _analyze_with_textract(self):
+        """Analyze current page with AWS Textract and add results to mark_text category."""
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "Please open a page first.")
+            return
+        
+        # Get AWS Textract backend
+        try:
+            from replan.desktop.utils.ocr_backends import get_backend_by_name, AWSTextractBackend
+        except ImportError as e:
+            messagebox.showerror("Import Error", 
+                               f"Failed to import OCR backends: {str(e)}\n\n"
+                               "Please ensure all dependencies are installed.")
+            return
+        
+        aws_profile = getattr(self.settings, 'aws_profile', '')
+        aws_region = getattr(self.settings, 'aws_region', 'us-east-1')
+        
+        try:
+            backend = get_backend_by_name('aws', aws_profile=aws_profile if aws_profile else None,
+                                         region_name=aws_region)
+        except Exception as e:
+            messagebox.showerror("Backend Error", 
+                               f"Failed to create AWS Textract backend: {str(e)}")
+            return
+        
+        if not backend:
+            messagebox.showerror("Textract Not Available", 
+                               "AWS Textract backend could not be created.\n\n"
+                               "Please check:\n"
+                               "1. boto3 is installed: pip install boto3\n"
+                               "2. AWS credentials are configured\n"
+                               "3. OCR settings in Preferences > OCR tab")
+            return
+        
+        if not isinstance(backend, AWSTextractBackend):
+            messagebox.showerror("Backend Type Error", 
+                               f"Expected AWSTextractBackend, got {type(backend).__name__}")
+            return
+        
+        if not backend.is_available():
+            messagebox.showerror("Textract Not Available", 
+                               "AWS Textract is not available.\n\n"
+                               "Please check:\n"
+                               "1. boto3 is installed: pip install boto3\n"
+                               "2. AWS credentials are configured in ~/.aws/credentials\n"
+                               "3. AWS Profile name is correct (if using profile)")
+            return
+        
+        self.status_var.set("Analyzing with AWS Textract...")
+        self.root.update()
+        
+        try:
+            # Convert page image to bytes
+            image = page.original_image
+            if image is None:
+                messagebox.showerror("Error", "Page image is not available.")
+                return
+            
+            # Convert image to PNG bytes
+            from PIL import Image as PILImage
+            import io
+            
+            if len(image.shape) == 3:
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            else:
+                image_rgb = image
+            
+            # Ensure image is uint8
+            if image_rgb.dtype != np.uint8:
+                image_rgb = (image_rgb * 255).astype(np.uint8) if image_rgb.max() <= 1.0 else image_rgb.astype(np.uint8)
+            
+            pil_image = PILImage.fromarray(image_rgb)
+            img_bytes_io = io.BytesIO()
+            pil_image.save(img_bytes_io, format='PNG')
+            document_bytes = img_bytes_io.getvalue()
+            
+            # Check document size (Textract has limits)
+            if len(document_bytes) > 5 * 1024 * 1024:  # 5MB limit for synchronous API
+                messagebox.showwarning("Image Too Large", 
+                                     f"Image is {len(document_bytes) / 1024 / 1024:.1f}MB. "
+                                     "Textract synchronous API supports up to 5MB. "
+                                     "Consider reducing image resolution.")
+                return
+            
+            # Analyze with Textract
+            self.status_var.set("Sending to AWS Textract...")
+            self.root.update()
+            
+            textract_json = backend.analyze_document_json(document_bytes)
+            
+            # Parse Textract results
+            from replan.desktop.utils.textract_utils import parse_textract_blocks, group_textract_regions_by_line
+            
+            self.status_var.set("Parsing Textract results...")
+            self.root.update()
+            
+            h, w = image.shape[:2]
+            
+            # Use the raw_response if available, otherwise use the parsed structure
+            if 'raw_response' in textract_json:
+                # Use raw response which has 'Blocks' (uppercase)
+                word_regions = parse_textract_blocks(textract_json['raw_response'], (h, w))
+            else:
+                # Use the parsed structure which has 'blocks' (lowercase)
+                word_regions = parse_textract_blocks(textract_json, (h, w))
+            
+            # Group words into lines
+            line_regions = group_textract_regions_by_line(word_regions)
+            
+            # Convert to format expected by _add_text_regions_to_category
+            new_regions = []
+            for i, line_region in enumerate(line_regions):
+                region_id = f"textract_line_{i}"
+                new_regions.append({
+                    'id': region_id,
+                    'bbox': line_region['bbox'],
+                    'text': line_region['text'],
+                    'confidence': line_region['confidence'],
+                    'mask': line_region.get('mask'),
+                    'mode': 'textract',
+                    'word_regions': line_region.get('word_regions', [])  # Keep individual words for editing
+                })
+            
+            if not new_regions:
+                self.status_var.set("No text detected by Textract")
+                messagebox.showinfo("No Text Found", "Textract did not detect any text in this page.")
+                return
+            
+            # Save Textract JSON for reference (optional)
+            # Could save to a file or store in page metadata
+            
+            # Get existing region IDs to avoid duplicates
+            existing_ids = set()
+            if hasattr(page, 'auto_text_regions'):
+                existing_ids.update(r.get('id', '') for r in page.auto_text_regions)
+            if hasattr(page, 'manual_text_regions'):
+                existing_ids.update(r.get('id', '') for r in page.manual_text_regions)
+            
+            # Filter out duplicates
+            if not hasattr(page, 'auto_text_regions'):
+                page.auto_text_regions = []
+            
+            added_regions = []
+            added_count = 0
+            for region in new_regions:
+                region_id = region.get('id', '')
+                if region_id not in existing_ids:
+                    page.auto_text_regions.append(region)
+                    existing_ids.add(region_id)
+                    added_count += 1
+                    added_regions.append(region)
+            
+            # Update combined mask
+            self._update_combined_text_mask(page, force_recompute=True)
+            
+            # Add regions to mark_text category as objects
+            objects_added = self._add_text_regions_to_category(page, added_regions)
+            
+            self.renderer.invalidate_cache()
+            self._update_display()
+            self.status_var.set(f"Textract analysis complete: {added_count} text lines detected, {objects_added} objects created")
+            
+            messagebox.showinfo("Textract Analysis Complete", 
+                              f"Found {added_count} text lines.\nCreated {objects_added} objects in mark_text category.")
+        
+        except ImportError as e:
+            error_msg = f"Missing dependency: {str(e)}\n\nPlease install boto3: pip install boto3"
+            print(error_msg)
+            messagebox.showerror("Missing Dependency", error_msg)
+            self.status_var.set("Textract analysis failed - missing boto3")
+        except RuntimeError as e:
+            # RuntimeError from our code contains helpful messages
+            error_msg = str(e)
+            print(f"Textract Error: {error_msg}")
+            messagebox.showerror("Textract Error", error_msg)
+            self.status_var.set("Textract analysis failed")
+        except Exception as e:
+            import traceback
+            error_str = str(e)
+            error_type = type(e).__name__
+            
+            # Provide more helpful error messages for common issues
+            if "NoCredentialsError" in error_type or "credentials" in error_str.lower():
+                error_msg = (f"AWS Credentials Error: {error_str}\n\n"
+                           "Please check:\n"
+                           "1. AWS Profile is correct in Preferences > OCR\n"
+                           "2. AWS credentials are configured in ~/.aws/credentials\n"
+                           "3. AWS_PROFILE environment variable (if used)")
+            elif "UnrecognizedClientException" in error_str or "InvalidClientTokenId" in error_str:
+                aws_profile = getattr(self.settings, 'aws_profile', '')
+                profile_info = f" (profile: '{aws_profile}')" if aws_profile else ""
+                error_msg = (f"Invalid AWS Credentials{profile_info}\n\n"
+                           f"Error: {error_str}\n\n"
+                           "The security token/credentials are invalid or expired.\n\n"
+                           "Please check:\n"
+                           "1. AWS Profile name is correct in Preferences > OCR tab\n"
+                           "2. Credentials in ~/.aws/credentials are valid and not expired\n"
+                           "3. If using environment variables, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are correct\n\n"
+                           f"Test credentials: aws sts get-caller-identity{' --profile ' + aws_profile if aws_profile else ''}")
+            elif "AccessDenied" in error_str or "UnauthorizedOperation" in error_str:
+                error_msg = (f"AWS Permission Error: {error_str}\n\n"
+                           "Your AWS credentials don't have Textract permissions.\n"
+                           "Please add 'AmazonTextractFullAccess' policy to your IAM user/role.")
+            elif "InvalidParameterException" in error_str:
+                error_msg = (f"Invalid Parameter: {error_str}\n\n"
+                           "The image format or size may not be supported.")
+            else:
+                error_msg = f"Error analyzing with Textract:\n\n{error_type}: {error_str}\n\n{traceback.format_exc()}"
+            
+            print(f"Textract Error: {error_msg}")
+            messagebox.showerror("Textract Error", error_msg)
+            self.status_var.set("Textract analysis failed")
     
     def _add_text_regions_to_category(self, page: PageTab, regions: list):
         """Add text regions as objects in the mark_text category. Returns number of objects created."""
@@ -2274,7 +2510,7 @@ class RePlanApp:
             self.status_var.set(f"Found labels: {dialog.result}")
     
     def _detect_text_regions(self, page: PageTab) -> list:
-        """Detect text regions in image using OCR and return list of regions."""
+        """Detect text regions in image using OCR with two-pass approach for better accuracy."""
         import pytesseract
         import re
         
@@ -2286,14 +2522,95 @@ class RePlanApp:
             # Configure tesseract path if needed
             pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
             
-            # Get bounding boxes for detected text - use word level only
+            # Convert to grayscale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Use PSM 6 (assume uniform block of text) - more restrictive than PSM 3
-            # This reduces false positives from random patterns
-            custom_config = r'--oem 3 --psm 6'
-
-            data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, config=custom_config)
+            # TWO-PASS APPROACH:
+            # Pass 1: Detect textboxes with clear white space around them
+            # This focuses OCR on actual textboxes, not structural elements
+            from replan.desktop.utils.ocr import detect_textboxes_with_whitespace, filter_structural_false_positives
+            
+            # Find textboxes with clear white space around them
+            # This focuses OCR on actual textboxes, not structural elements
+            text_dense_regions = detect_textboxes_with_whitespace(gray, min_whitespace_ratio=0.3, min_textbox_size=50)
+            
+            # Use PSM 6 (assume uniform block of text) for focused regions
+            # But also do full-image OCR with PSM 11 (sparse text) to catch fragmented text
+            custom_config_focused = r'--oem 3 --psm 6'
+            custom_config_full = r'--oem 3 --psm 11'  # Sparse text - better for fragmented text blocks
+            
+            # If we found text-dense regions, run OCR on those regions for better accuracy
+            # Otherwise, do full-image OCR
+            if text_dense_regions and len(text_dense_regions) > 0:
+                # Pass 2: Run OCR on text-dense regions with higher accuracy settings
+                all_data = {'level': [], 'left': [], 'top': [], 'width': [], 'height': [], 
+                           'conf': [], 'text': []}
+                
+                for x, y, bw, bh in text_dense_regions:
+                    # Expand region slightly for context
+                    padding = 20
+                    roi_x1 = max(0, x - padding)
+                    roi_y1 = max(0, y - padding)
+                    roi_x2 = min(w, x + bw + padding)
+                    roi_y2 = min(h, y + bh + padding)
+                    
+                    roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
+                    if roi.size == 0:
+                        continue
+                    
+                    try:
+                        roi_data = pytesseract.image_to_data(roi, output_type=pytesseract.Output.DICT, config=custom_config_focused)
+                        # Adjust coordinates to account for ROI offset
+                        for i in range(len(roi_data['level'])):
+                            all_data['level'].append(roi_data['level'][i])
+                            all_data['left'].append(roi_data['left'][i] + roi_x1)
+                            all_data['top'].append(roi_data['top'][i] + roi_y1)
+                            all_data['width'].append(roi_data['width'][i])
+                            all_data['height'].append(roi_data['height'][i])
+                            all_data['conf'].append(roi_data['conf'][i])
+                            all_data['text'].append(roi_data['text'][i])
+                    except Exception as e:
+                        print(f"OCR error on ROI: {e}")
+                        continue
+                
+                data = all_data
+            else:
+                # No text-dense regions found, do full-image OCR
+                data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, config=custom_config_full)
+            
+            # Also do a full-image pass with sparse text mode to catch fragmented text blocks
+            # This helps catch text like ".060 CARBON FIBER ELEVATOR JOINER" that might be missed
+            try:
+                full_data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, config=custom_config_full)
+                # Merge with existing data, avoiding duplicates
+                existing_positions = set()
+                for i in range(len(data['level'])):
+                    if data['level'][i] == 5:  # Word level
+                        x, y = data['left'][i], data['top'][i]
+                        existing_positions.add((x, y))
+                
+                # Add new detections that aren't duplicates
+                for i in range(len(full_data['level'])):
+                    if full_data['level'][i] == 5:  # Word level
+                        x, y = full_data['left'][i], full_data['top'][i]
+                        # Check if this position is already covered (within 10px)
+                        is_duplicate = False
+                        for ex_x, ex_y in existing_positions:
+                            if abs(x - ex_x) < 10 and abs(y - ex_y) < 10:
+                                is_duplicate = True
+                                break
+                        
+                        if not is_duplicate:
+                            data['level'].append(full_data['level'][i])
+                            data['left'].append(full_data['left'][i])
+                            data['top'].append(full_data['top'][i])
+                            data['width'].append(full_data['width'][i])
+                            data['height'].append(full_data['height'][i])
+                            data['conf'].append(full_data['conf'][i])
+                            data['text'].append(full_data['text'][i])
+            except Exception as e:
+                print(f"Full-image OCR pass error: {e}")
+                pass
 
             region_id = 1
             n_boxes = len(data['level'])
@@ -2302,9 +2619,10 @@ class RePlanApp:
                 if data['level'][i] != 5:
                     continue
                     
-                # Only consider words with high confidence (increased threshold)
+                # Consider words with moderate confidence (lowered to catch fragmented text)
+                # But apply stricter filtering later
                 conf = int(data['conf'][i]) if data['conf'][i] != '-1' else 0
-                if conf < 50:  # Increased from 30 to 50 for better filtering
+                if conf < 30:  # Lowered from 50 to 30 to catch fragmented text, but filter more strictly later
                     continue
                 
                 # Only consider boxes with reasonable dimensions (not the whole image)
@@ -2382,6 +2700,12 @@ class RePlanApp:
                     'mask': mask
                 })
                 region_id += 1
+            
+            # Filter out structural false positives using uniform text characteristics
+            if regions:
+                regions = filter_structural_false_positives(regions, image)
+            
+            return regions
            
         except Exception as e:
             print(f"Text detection error: {e}")
@@ -3006,7 +3330,12 @@ class RePlanApp:
     
     def _update_combined_hatch_mask(self, page: PageTab, force_recompute: bool = False):
         """
-        Combine auto-detected and manual hatching masks with caching.
+        Combine auto-detected, manual, and mark_hatch object masks with caching.
+        
+        This includes masks from:
+        - auto_hatch_regions (auto-detected hatching)
+        - manual_hatch_regions (manually added regions)
+        - All mark_hatch objects in all_objects (for objects created via rectangle/polyline)
         
         Args:
             page: Page to update
@@ -3017,7 +3346,13 @@ class RePlanApp:
             # Check if regions have changed
             auto_count = len(getattr(page, 'auto_hatch_regions', []))
             manual_count = len(getattr(page, 'manual_hatch_regions', []))
-            current_key = f"{auto_count}_{manual_count}"
+            # Count mark_hatch objects on this page
+            object_count = sum(
+                1 for obj in self.all_objects
+                if obj.category == "mark_hatch"
+                and any(inst.page_id == page.tab_id for inst in obj.instances)
+            )
+            current_key = f"{auto_count}_{manual_count}_{object_count}"
             if page._hatch_mask_cache_key == current_key and hasattr(page, 'combined_hatch_mask'):
                 # Cache is valid, skip recomputation
                 return
@@ -3027,8 +3362,10 @@ class RePlanApp:
         
         auto_count = 0
         manual_count = 0
+        object_count = 0
         auto_pixels = 0
         manual_pixels = 0
+        object_pixels = 0
         
         # Collect all masks first, then combine in one operation (faster than loop with np.maximum)
         all_masks = []
@@ -3057,6 +3394,20 @@ class RePlanApp:
                     else:
                         print(f"Manual hatch mask shape mismatch: {mask.shape} vs expected {(h, w)}")
         
+        # Add masks from all mark_hatch objects on this page
+        for obj in self.all_objects:
+            if obj.category == "mark_hatch":
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            if elem.mask is not None:
+                                if elem.mask.shape == (h, w):
+                                    all_masks.append(elem.mask)
+                                    object_count += 1
+                                    object_pixels += np.sum(elem.mask > 0)
+                                else:
+                                    print(f"Mark_hatch object mask shape mismatch: {elem.mask.shape} vs expected {(h, w)}")
+        
         # Combine all masks (use batch processing for large numbers to avoid memory issues)
         if all_masks:
             # For large numbers of masks, process in batches to avoid memory allocation errors
@@ -3068,14 +3419,17 @@ class RePlanApp:
                 for mask in batch:
                     combined = np.maximum(combined, mask)
             combined = combined.astype(np.uint8)
+        else:
+            # No masks - set to None to indicate no hatching to hide
+            combined = None
         
-        total_pixels = np.sum(combined > 0)
+        total_pixels = (auto_pixels + manual_pixels + object_pixels) if combined is not None else 0
         # Store cache key and combined mask
-        page._hatch_mask_cache_key = f"{auto_count}_{manual_count}"
+        page._hatch_mask_cache_key = f"{auto_count}_{manual_count}_{object_count}"
         page.combined_hatch_mask = combined
         
         print(f"_update_combined_hatch_mask: auto={auto_count} ({auto_pixels}px), "
-              f"manual={manual_count} ({manual_pixels}px), combined={total_pixels}px")
+              f"manual={manual_count} ({manual_pixels}px), objects={object_count} ({object_pixels}px), combined={total_pixels}px")
         # Update working image cache incrementally (handles both addition and removal)
         page = self._get_current_page()
         if page and page.tab_id == self.current_page_id:
@@ -3270,11 +3624,20 @@ class RePlanApp:
         canvas.bind("<ButtonRelease-1>", self._on_release)
         canvas.bind("<Motion>", self._on_motion)
         
-        # Mouse wheel scrolling for canvas
+        # Mouse wheel scrolling and zooming for canvas
         def _canvas_mousewheel(event):
-            # Vertical scroll with mouse wheel
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            self._draw_rulers(page)
+            # Check if Ctrl is pressed for zooming
+            if event.state & 0x4:  # Control key is pressed
+                # Zoom in/out with mouse wheel
+                delta = event.delta / 120
+                if delta > 0:
+                    self._zoom_in()
+                else:
+                    self._zoom_out()
+            else:
+                # Normal vertical scroll with mouse wheel
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                self._draw_rulers(page)
         
         def _canvas_mousewheel_horizontal(event):
             # Horizontal scroll with Shift+wheel or horizontal wheel
@@ -3283,6 +3646,7 @@ class RePlanApp:
         
         def _bind_canvas_scroll(event):
             canvas.bind_all("<MouseWheel>", _canvas_mousewheel)
+            canvas.bind_all("<Control-MouseWheel>", _canvas_mousewheel)  # Explicit Ctrl+mouse wheel
             canvas.bind_all("<Shift-MouseWheel>", _canvas_mousewheel_horizontal)
             # For mice with horizontal scroll (tilt wheel)
             canvas.bind_all("<Shift-Button-4>", lambda e: canvas.xview_scroll(-1, "units"))
@@ -3290,6 +3654,7 @@ class RePlanApp:
         
         def _unbind_canvas_scroll(event):
             canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Control-MouseWheel>")
             canvas.unbind_all("<Shift-MouseWheel>")
             canvas.unbind_all("<Shift-Button-4>")
             canvas.unbind_all("<Shift-Button-5>")
@@ -3381,6 +3746,26 @@ class RePlanApp:
         if not (0 <= x < w and 0 <= y < h):
             return
         
+        # Handle label anchor movement start
+        if self.is_moving_label_anchor:
+            # Find label near click point or element at click point
+            elem = self._find_label_at_point(x, y)
+            if not elem:
+                # Try to find element at click point
+                page = self._get_current_page()
+                if page:
+                    result = page.get_element_at_point(x, y)
+                    if result:
+                        _, _, clicked_elem = result
+                        # Check if this element is in our list of movable elements
+                        if hasattr(self, '_label_anchor_elements') and clicked_elem in self._label_anchor_elements:
+                            elem = clicked_elem
+            
+            if elem:
+                self.label_anchor_drag_element = elem
+                self.label_anchor_drag_start = (x, y)
+            return
+        
         # Handle object movement start
         if self.is_moving_objects:
             self.object_move_start = (x, y)
@@ -3429,6 +3814,17 @@ class RePlanApp:
             return
         
         # Cancel move operations on right-click
+        if self.is_moving_label_anchor:
+            self.is_moving_label_anchor = False
+            self.label_anchor_drag_element = None
+            self.label_anchor_drag_start = None
+            page = self._get_current_page()
+            if page and hasattr(page, 'canvas'):
+                page.canvas.config(cursor="crosshair")
+            self.status_var.set("Label anchor move cancelled")
+            self._update_display()
+            return
+        
         if self.is_moving_pixels:
             self.is_moving_pixels = False
             self.pixel_move_start = None
@@ -3509,6 +3905,24 @@ class RePlanApp:
         
         x, y = self._canvas_to_image(event.x, event.y)
         
+        # Handle label anchor movement
+        if self.is_moving_label_anchor and self.label_anchor_drag_element:
+            if self.label_anchor_drag_start:
+                # Calculate new offset from centroid
+                centroid = self.label_anchor_drag_element.centroid
+                if centroid:
+                    cx, cy = centroid
+                    # New anchor position is current mouse position
+                    new_offset = (x - cx, y - cy)
+                    # Update element's anchor offset
+                    self.label_anchor_drag_element.label_anchor_offset = new_offset
+                    # Clear label_position to use custom offset
+                    self.label_anchor_drag_element.label_position = "center"
+                    # Update display to show new position
+                    self.renderer.invalidate_cache()
+                    self._update_display()
+            return
+        
         # Handle pixel movement
         if self.is_moving_pixels and self.selected_pixel_mask is not None and self.selected_pixel_bbox:
             if self.pixel_move_start is None:
@@ -3543,6 +3957,28 @@ class RePlanApp:
             self._redraw_points()
     
     def _on_release(self, event):
+        # Handle label anchor movement completion
+        if self.is_moving_label_anchor and self.label_anchor_drag_element:
+            page = self._get_current_page()
+            if page:
+                x, y = self._canvas_to_image(event.x, event.y)
+                centroid = self.label_anchor_drag_element.centroid
+                if centroid:
+                    cx, cy = centroid
+                    # Finalize offset
+                    final_offset = (x - cx, y - cy)
+                    self.label_anchor_drag_element.label_anchor_offset = final_offset
+                    self.label_anchor_drag_element.label_position = "center"
+                    # Update display
+                    self.renderer.invalidate_cache()
+                    self._update_display()
+                    self.workspace_modified = True
+                    self.status_var.set("Label anchor moved")
+            # Reset drag state
+            self.label_anchor_drag_element = None
+            self.label_anchor_drag_start = None
+            return
+        
         # Handle pixel movement completion
         if self.is_moving_pixels and self.pixel_move_offset is not None:
             offset_x, offset_y = self.pixel_move_offset
@@ -3878,6 +4314,14 @@ class RePlanApp:
                     self.workspace_modified = True
                     self.renderer.invalidate_cache()  # Objects changed
                     
+                    # Update combined masks for mark_* categories when elements are added to existing objects
+                    if elem.category == "mark_text":
+                        self._update_combined_text_mask(page, force_recompute=True)
+                    elif elem.category == "mark_hatch":
+                        self._update_combined_hatch_mask(page, force_recompute=True)
+                    elif elem.category == "mark_line":
+                        self._update_combined_line_mask(page, force_recompute=True)
+                    
                     # Ensure sequential instance numbering
                     self._renumber_instances(obj)
                     
@@ -3911,6 +4355,14 @@ class RePlanApp:
         inst.elements.append(elem)
         new_obj.instances.append(inst)
         self.all_objects.append(new_obj)
+        
+        # Update combined masks for mark_* categories when objects are created
+        if elem.category == "mark_text":
+            self._update_combined_text_mask(page, force_recompute=True)
+        elif elem.category == "mark_hatch":
+            self._update_combined_hatch_mask(page, force_recompute=True)
+        elif elem.category == "mark_line":
+            self._update_combined_line_mask(page, force_recompute=True)
         
         # CRITICAL: If this is a planform, find and store all visible objects within its boundaries
         # Do this asynchronously to avoid blocking planform creation
@@ -4714,9 +5166,11 @@ class RePlanApp:
             # Add to category using existing _add_element method
             self._add_element(elem)
             
-            # Update combined mask for mark_text objects
+            # Update combined mask for mark_* objects
             if cat_name == "mark_text":
                 self._update_combined_text_mask(page, force_recompute=True)
+            elif cat_name == "mark_hatch":
+                self._update_combined_hatch_mask(page, force_recompute=True)
             
             self.status_var.set(f"Created {cat_name} object from rectangle selection")
     
@@ -5431,6 +5885,8 @@ class RePlanApp:
                            state="normal" if num_objects == 1 else "disabled")
             menu.add_command(label="Change Category", command=self._change_object_category,
                            state="normal" if num_objects >= 1 else "disabled")
+            menu.add_command(label="Move Label Anchor", command=self._change_label_position,
+                           state="normal" if num_objects >= 1 or num_instances >= 1 or num_elements >= 1 else "disabled")
             menu.add_command(label="Edit Attributes", command=self._edit_attributes)
             menu.add_command(label="Draw Perimeter", command=self._draw_perimeter,
                            state="normal" if num_objects == 1 else "disabled")
@@ -5452,6 +5908,7 @@ class RePlanApp:
         elif num_instances >= 1 and num_objects == 0:
             menu.add_command(label="Move", command=self._start_move_objects)
             menu.add_command(label="Move to Page", command=self._move_instance_to_page)
+            menu.add_command(label="Move Label Anchor", command=self._change_label_position)
             menu.add_command(label="Edit Attributes", command=self._edit_attributes)
             menu.add_separator()
         
@@ -5459,6 +5916,7 @@ class RePlanApp:
         if num_elements >= 1:
             if num_objects == 0 and num_instances == 0:  # Only elements selected
                 menu.add_command(label="Move", command=self._start_move_objects)
+                menu.add_command(label="Move Label Anchor", command=self._change_label_position)
                 menu.add_separator()
         
         # Expand/collapse
@@ -7207,22 +7665,108 @@ class RePlanApp:
             if "mark_line" in old_categories_changed or "mark_line" in new_categories_added:
                 self._update_combined_line_mask(page, force_recompute=True)
         
-        # Invalidate working image cache if changing to/from mark categories
-        if old_categories_changed.intersection({"mark_text", "mark_hatch", "mark_line"}) or \
-           new_categories_added.intersection({"mark_text", "mark_hatch", "mark_line"}):
-            self._invalidate_working_image_cache()
-        
-        # Update rendering cache and display
+        # Refresh display
         self.renderer.invalidate_cache()
-        self._update_tree()  # Rebuild tree to reflect category changes
         self._update_display()
-        self.workspace_modified = True
+        self._update_tree()
+        self.status_var.set(f"Changed category for {changed_count} object(s)")
+    
+    def _find_label_at_point(self, x: int, y: int, threshold: int = 30):
+        """
+        Find the element whose label is near the given point.
         
-        # Show status message
-        if changed_count == 1:
-            self.status_var.set(f"Changed category of '{first_obj.name}' from {current_category} to {new_category}")
-        else:
-            self.status_var.set(f"Changed category of {changed_count} objects from {current_category} to {new_category}")
+        Returns the SegmentElement if a label is found within threshold pixels, None otherwise.
+        """
+        page = self._get_current_page()
+        if not page:
+            return None
+        
+        # Search through all objects on current page
+        for obj in self.all_objects:
+            for inst in obj.instances:
+                if inst.page_id != page.tab_id:
+                    continue
+                
+                # Use first element's label position for the instance
+                if inst.elements:
+                    elem = inst.elements[0]
+                    label_pos = elem.get_label_position()
+                    if label_pos:
+                        lx, ly = label_pos
+                        # Check distance (accounting for zoom)
+                        distance = ((x - lx)**2 + (y - ly)**2)**0.5
+                        if distance <= threshold / self.zoom_level:
+                            return elem
+        
+        return None
+    
+    def _change_label_position(self):
+        """Change the label position for selected objects/instances/elements."""
+        # Collect all elements that need label position change
+        elements_to_change = []
+        
+        # Get elements from selected objects
+        for obj_id in self.selected_object_ids:
+            obj = self._get_object_by_id(obj_id)
+            if obj:
+                for inst in obj.instances:
+                    for elem in inst.elements:
+                        elements_to_change.append(elem)
+        
+        # Get elements from selected instances
+        for inst_id in self.selected_instance_ids:
+            obj_id, inst_num = inst_id.rsplit('_inst_', 1)
+            obj = self._get_object_by_id(obj_id)
+            if obj:
+                try:
+                    inst_num = int(inst_num)
+                    for inst in obj.instances:
+                        if inst.instance_num == inst_num:
+                            for elem in inst.elements:
+                                elements_to_change.append(elem)
+                            break
+                except ValueError:
+                    pass
+        
+        # Get selected elements directly
+        for elem_id in self.selected_element_ids:
+            obj_id, inst_num, elem_idx = elem_id.rsplit('_elem_', 1)
+            obj_id, inst_num = obj_id.rsplit('_inst_', 1)
+            obj = self._get_object_by_id(obj_id)
+            if obj:
+                try:
+                    inst_num = int(inst_num)
+                    elem_idx = int(elem_idx)
+                    for inst in obj.instances:
+                        if inst.instance_num == inst_num:
+                            if 0 <= elem_idx < len(inst.elements):
+                                elements_to_change.append(inst.elements[elem_idx])
+                            break
+                except ValueError:
+                    pass
+        
+        if not elements_to_change:
+            messagebox.showinfo("Info", 
+                              "Select at least one object, instance, or element to move label anchor.\n\n"
+                              "Then click and drag the label on the canvas to move it.",
+                              parent=self.root)
+            return
+        
+        # Enter drag-and-drop mode
+        self.is_moving_label_anchor = True
+        self.label_anchor_drag_element = None
+        self.label_anchor_drag_start = None
+        
+        # Change cursor to indicate drag mode
+        page = self._get_current_page()
+        if page and hasattr(page, 'canvas'):
+            page.canvas.config(cursor="hand2")
+        
+        # Show instructions
+        self.status_var.set(f"Drag-and-drop mode: Click and drag labels to move anchors ({len(elements_to_change)} element(s) ready). Right-click to cancel.")
+        
+        # Store elements that can be moved (for reference)
+        self._label_anchor_elements = elements_to_change
     
     def _merge_as_instances(self):
         if len(self.selected_object_ids) < 2:
@@ -7959,23 +8503,95 @@ class RePlanApp:
     
     def _get_view_state(self) -> dict:
         """Get current view state for workspace saving."""
-        # Get current panel widths - use actual width from right panel frame if available
-        object_panel_width = self.settings.tree_width
+        # Save sidebar and center widths, then calculate object viewer from remaining space
+        sidebar_width = self.settings.sidebar_width
+        center_width = None
+        sidebar_width_ratio = None
+        center_width_ratio = None
         
-        # Try to get actual width from the right panel frame
-        if hasattr(self, 'layout') and hasattr(self.layout, 'right_panel_frame'):
+        # Get actual widths from sash positions (most reliable method)
+        if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
             try:
-                # Force update to get accurate width
-                self.layout.right_panel_frame.update_idletasks()
+                # Force update to get accurate dimensions
+                self.layout.paned.update_idletasks()
                 self.root.update_idletasks()
-                actual_width = self.layout.right_panel_frame.winfo_width()
-                # Only use actual width if it's reasonable (not 0 or 1)
-                if actual_width > 50:
-                    object_panel_width = actual_width
-                    # Update settings to keep them in sync
-                    self.settings.tree_width = actual_width
+                
+                paned = self.layout.paned
+                paned_width = paned.winfo_width()
+                
+                if paned_width > 0:
+                    panes = paned.panes()
+                    left_panel_frame = self.layout.left_panel_frame
+                    center_frame = self.layout.center_frame
+                    right_panel_frame = self.layout.right_panel_frame
+                    
+                    # Find indices of each panel
+                    left_index = None
+                    center_index = None
+                    right_index = None
+                    
+                    for i, pane_id in enumerate(panes):
+                        try:
+                            pane_widget = paned.nametowidget(pane_id)
+                            if pane_widget == left_panel_frame:
+                                left_index = i
+                            elif pane_widget == center_frame:
+                                center_index = i
+                            elif pane_widget == right_panel_frame:
+                                right_index = i
+                        except:
+                            continue
+                    
+                    # Get sidebar width (sash 0 position)
+                    if left_index is not None and left_index == 0:
+                        try:
+                            sash0_pos = paned.sashpos(0)
+                            if sash0_pos > 50:  # Reasonable minimum
+                                sidebar_width = sash0_pos
+                                sidebar_width_ratio = sash0_pos / paned_width if paned_width > 0 else None
+                                self.settings.sidebar_width = sidebar_width
+                                print(f"DEBUG: Saving sidebar width: {sidebar_width}px (ratio: {sidebar_width_ratio})")
+                        except (tk.TclError, IndexError, AttributeError):
+                            # Fallback to winfo_width
+                            try:
+                                actual_width = left_panel_frame.winfo_width()
+                                if actual_width > 50:
+                                    sidebar_width = actual_width
+                                    sidebar_width_ratio = actual_width / paned_width if paned_width > 0 else None
+                                    self.settings.sidebar_width = sidebar_width
+                            except:
+                                pass
+                    
+                    # Get center width (sash 1 position - sash 0 position)
+                    if center_index is not None and right_index is not None and center_index < right_index:
+                        try:
+                            sash0_pos = paned.sashpos(0) if left_index is not None else 0
+                            sash1_pos = paned.sashpos(1) if len(panes) > 2 else paned_width
+                            
+                            center_actual_width = sash1_pos - sash0_pos
+                            if center_actual_width > 100:  # Reasonable minimum
+                                center_width = center_actual_width
+                                center_width_ratio = center_actual_width / paned_width if paned_width > 0 else None
+                                print(f"DEBUG: Saving center width: {center_width}px (ratio: {center_width_ratio})")
+                        except (tk.TclError, IndexError, AttributeError):
+                            # Fallback to winfo_width
+                            try:
+                                actual_width = center_frame.winfo_width()
+                                if actual_width > 100:
+                                    center_width = actual_width
+                                    center_width_ratio = actual_width / paned_width if paned_width > 0 else None
+                            except:
+                                pass
+                    
+                    # Calculate object viewer width from remaining space
+                    if sidebar_width and center_width:
+                        object_viewer_width = paned_width - sidebar_width - center_width
+                        if object_viewer_width > 50:
+                            self.settings.tree_width = object_viewer_width
+                            print(f"DEBUG: Calculated object viewer width: {object_viewer_width}px (from remaining space)")
+                            
             except Exception as e:
-                # Fall back to settings value
+                print(f"DEBUG: Error getting panel widths: {e}")
                 pass
         
         return {
@@ -7984,7 +8600,10 @@ class RePlanApp:
             "group_by": self.group_by_var.get() if hasattr(self, 'group_by_var') else "category",
             "show_labels": self.show_labels,
             "current_view": self.current_view_var.get() if hasattr(self, 'current_view_var') else "",
-            "object_panel_width": object_panel_width,
+            "sidebar_width": sidebar_width,
+            "sidebar_width_ratio": sidebar_width_ratio,
+            "center_width": center_width,
+            "center_width_ratio": center_width_ratio,
         }
     
     def _restore_view_state(self, view_state: dict):
@@ -8010,112 +8629,183 @@ class RePlanApp:
         if hasattr(self, 'current_view_var'):
             self.current_view_var.set(view_state.get("current_view", ""))
         
-        # Restore object panel width - defer until after layout is fully initialized
-        object_panel_width = view_state.get("object_panel_width")
-        if object_panel_width and object_panel_width > 0 and hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
-            # Track restoration attempts
-            if not hasattr(self, '_panel_width_restore_attempts'):
-                self._panel_width_restore_attempts = 0
-            
-            def restore_panel_width():
-                """Restore panel width by setting sash position in PanedWindow."""
-                self._panel_width_restore_attempts += 1
-                max_attempts = 5
+        # Restore panel widths - save sidebar and center, then object viewer takes remaining space
+        sidebar_width = view_state.get("sidebar_width")
+        sidebar_width_ratio = view_state.get("sidebar_width_ratio")
+        center_width = view_state.get("center_width")
+        center_width_ratio = view_state.get("center_width_ratio")
+        
+        # Support legacy format (object_panel_width) for backward compatibility
+        if not sidebar_width and not center_width:
+            object_panel_width = view_state.get("object_panel_width")
+            object_panel_width_ratio = view_state.get("object_panel_width_ratio")
+            if object_panel_width or object_panel_width_ratio:
+                # Use default sidebar and center widths, calculate object viewer from saved width
+                sidebar_width = self.settings.sidebar_width
+                center_width = None  # Will be calculated
+        
+        if sidebar_width or sidebar_width_ratio or center_width or center_width_ratio:
+            if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
+                # Track restoration attempts
+                if not hasattr(self, '_panel_width_restore_attempts'):
+                    self._panel_width_restore_attempts = 0
                 
-                try:
-                    if not hasattr(self.layout, 'paned') or not hasattr(self.layout, 'right_panel_frame'):
-                        if self._panel_width_restore_attempts < max_attempts:
-                            self.root.after(200, restore_panel_width)
-                        return
+                def restore_panel_widths():
+                    """Restore panel widths by setting sash positions in PanedWindow."""
+                    self._panel_width_restore_attempts += 1
+                    max_attempts = 10
                     
-                    paned = self.layout.paned
-                    right_panel_frame = self.layout.right_panel_frame
-                    
-                    # Ensure geometry is updated
-                    paned.update_idletasks()
-                    self.root.update_idletasks()
-                    
-                    # Get panes list to find right panel index
-                    panes = paned.panes()
-                    if not panes:
-                        if self._panel_width_restore_attempts < max_attempts:
-                            self.root.after(200, restore_panel_width)
-                        return
-                    
-                    # Find the index of the right panel frame
-                    right_panel_index = None
-                    for i, pane_id in enumerate(panes):
-                        try:
-                            pane_widget = paned.nametowidget(pane_id)
-                            if pane_widget == right_panel_frame:
-                                right_panel_index = i
-                                break
-                        except:
-                            continue
-                    
-                    if right_panel_index is None:
-                        if self._panel_width_restore_attempts < max_attempts:
-                            self.root.after(200, restore_panel_width)
-                        return
-                    
-                    # The sash before the right panel controls its width
-                    # If right panel is at index N, sash index is N-1
-                    if right_panel_index > 0:
-                        sash_index = right_panel_index - 1
+                    try:
+                        if not hasattr(self.layout, 'paned'):
+                            if self._panel_width_restore_attempts < max_attempts:
+                                self.root.after(200, restore_panel_widths)
+                            return
+                        
+                        paned = self.layout.paned
+                        left_panel_frame = self.layout.left_panel_frame
+                        center_frame = self.layout.center_frame
+                        right_panel_frame = self.layout.right_panel_frame
+                        
+                        # Ensure geometry is updated
+                        paned.update_idletasks()
+                        self.root.update_idletasks()
+                        
+                        # Get panes list to find panel indices
+                        panes = paned.panes()
+                        if len(panes) < 2:
+                            if self._panel_width_restore_attempts < max_attempts:
+                                self.root.after(200, restore_panel_widths)
+                            return
+                        
+                        # Find indices of each panel
+                        left_index = None
+                        center_index = None
+                        right_index = None
+                        
+                        for i, pane_id in enumerate(panes):
+                            try:
+                                pane_widget = paned.nametowidget(pane_id)
+                                if pane_widget == left_panel_frame:
+                                    left_index = i
+                                elif pane_widget == center_frame:
+                                    center_index = i
+                                elif pane_widget == right_panel_frame:
+                                    right_index = i
+                            except:
+                                continue
                         
                         # Get current window width
                         window_width = paned.winfo_width()
                         
                         if window_width <= 0:
                             if self._panel_width_restore_attempts < max_attempts:
-                                self.root.after(200, restore_panel_width)
+                                self.root.after(200, restore_panel_widths)
                             return
                         
-                        # Calculate sash position: window_width - panel_width
-                        # Ensure minimum sizes for other panes (center pane needs at least 400px)
-                        min_center_width = 400
-                        max_panel_width = window_width - min_center_width
-                        target_width = min(object_panel_width, max_panel_width)
-                        sash_position = window_width - target_width
+                        # Restore sidebar width (sash 0)
+                        target_sidebar_width = None
+                        if left_index is not None and left_index == 0:
+                            try:
+                                # Calculate target sidebar width
+                                if sidebar_width_ratio and sidebar_width_ratio > 0:
+                                    target_sidebar_width = int(window_width * sidebar_width_ratio)
+                                elif sidebar_width and sidebar_width > 0:
+                                    target_sidebar_width = min(sidebar_width, window_width - 600)  # Leave room for center + object viewer
+                                else:
+                                    target_sidebar_width = self.settings.sidebar_width
+                                
+                                target_sidebar_width = max(200, min(target_sidebar_width, window_width - 600))  # Clamp to reasonable range
+                                
+                                # Set sash 0 position
+                                try:
+                                    current_sash0 = paned.sashpos(0)
+                                    if abs(current_sash0 - target_sidebar_width) > 5:
+                                        paned.sashpos(0, target_sidebar_width)
+                                        self.settings.sidebar_width = target_sidebar_width
+                                        print(f"DEBUG: Restored sidebar width to {target_sidebar_width}px (sash 0, window width {window_width})")
+                                    else:
+                                        self.settings.sidebar_width = target_sidebar_width
+                                        print(f"DEBUG: Sidebar width already correct: {current_sash0}px")
+                                except (tk.TclError, AttributeError, IndexError) as e:
+                                    print(f"DEBUG: Could not set sash 0: {e}")
+                                    if self._panel_width_restore_attempts < max_attempts:
+                                        self.root.after(200, restore_panel_widths)
+                                    return
+                                    
+                            except Exception as e:
+                                print(f"DEBUG: Error restoring sidebar width: {e}")
                         
-                        # Ensure sash position is valid
-                        sash_position = max(min_center_width, min(sash_position, window_width - 200))
+                        # Restore center width (sash 1)
+                        if center_index is not None and right_index is not None and len(panes) >= 3:
+                            try:
+                                # Get current sidebar width (sash 0)
+                                try:
+                                    current_sash0 = paned.sashpos(0)
+                                except:
+                                    current_sash0 = target_sidebar_width if target_sidebar_width is not None else self.settings.sidebar_width
+                                
+                                # Calculate target center width
+                                if center_width_ratio and center_width_ratio > 0:
+                                    target_center_width = int(window_width * center_width_ratio)
+                                elif center_width and center_width > 0:
+                                    target_center_width = center_width
+                                else:
+                                    # Calculate from remaining space (window - sidebar - min object viewer)
+                                    min_object_viewer = 200
+                                    target_center_width = window_width - current_sash0 - min_object_viewer
+                                
+                                # Ensure minimum sizes
+                                min_center_width = 400
+                                min_object_viewer = 200
+                                max_center_width = window_width - current_sash0 - min_object_viewer
+                                target_center_width = max(min_center_width, min(target_center_width, max_center_width))
+                                
+                                # Calculate sash 1 position: sidebar_width + center_width
+                                target_sash1 = current_sash0 + target_center_width
+                                target_sash1 = max(current_sash0 + min_center_width, min(target_sash1, window_width - min_object_viewer))
+                                
+                                # Set sash 1 position
+                                try:
+                                    current_sash1 = paned.sashpos(1)
+                                    if abs(current_sash1 - target_sash1) > 5:
+                                        paned.sashpos(1, target_sash1)
+                                        # Object viewer width is automatically: window_width - target_sash1
+                                        object_viewer_width = window_width - target_sash1
+                                        self.settings.tree_width = object_viewer_width
+                                        print(f"DEBUG: Restored center width to {target_center_width}px (sash 1 at {target_sash1}, object viewer: {object_viewer_width}px)")
+                                    else:
+                                        object_viewer_width = window_width - current_sash1
+                                        self.settings.tree_width = object_viewer_width
+                                        print(f"DEBUG: Center width already correct: {current_sash1 - current_sash0}px, object viewer: {object_viewer_width}px")
+                                    
+                                    # Save settings
+                                    from replan.desktop.config import save_settings
+                                    save_settings(self.settings)
+                                    
+                                except (tk.TclError, AttributeError, IndexError) as e:
+                                    print(f"DEBUG: Could not set sash 1: {e}")
+                                    if self._panel_width_restore_attempts < max_attempts:
+                                        self.root.after(200, restore_panel_widths)
+                                    return
+                                    
+                            except Exception as e:
+                                print(f"DEBUG: Error restoring center width: {e}")
+                                if self._panel_width_restore_attempts < max_attempts:
+                                    self.root.after(200, restore_panel_widths)
+                                return
                         
-                        try:
-                            # Get current sash position to verify it's different
-                            current_sash_pos = paned.sashpos(sash_index)
-                            if abs(current_sash_pos - sash_position) > 5:  # Only update if significantly different
-                                paned.sashpos(sash_index, sash_position)
-                                self.settings.tree_width = target_width
-                                save_settings(self.settings)
-                                print(f"DEBUG: Restored object panel width to {target_width}px (sash {sash_index} at {sash_position}, window width {window_width}, was {current_sash_pos})")
-                            else:
-                                # Already at correct position
-                                self.settings.tree_width = target_width
-                                save_settings(self.settings)
-                        except tk.TclError as e:
-                            print(f"DEBUG: Error setting sash position (attempt {self._panel_width_restore_attempts}): {e}")
-                            if self._panel_width_restore_attempts < max_attempts:
-                                self.root.after(200, restore_panel_width)
-                        except Exception as e:
-                            print(f"DEBUG: Unexpected error restoring panel width (attempt {self._panel_width_restore_attempts}): {e}")
-                            if self._panel_width_restore_attempts < max_attempts:
-                                self.root.after(200, restore_panel_width)
-                except Exception as e:
-                    print(f"DEBUG: Error restoring panel width (attempt {self._panel_width_restore_attempts}): {e}")
-                    import traceback
-                    traceback.print_exc()
-                    if self._panel_width_restore_attempts < max_attempts:
-                        self.root.after(200, restore_panel_width)
-            
-            # Reset attempts counter
-            self._panel_width_restore_attempts = 0
-            
-            # Defer restoration until after layout is fully rendered
-            # Use multiple attempts with increasing delays to ensure layout is ready
-            self.root.after(100, restore_panel_width)
-            self.root.after(300, restore_panel_width)
-            self.root.after(500, restore_panel_width)
+                        # Successfully restored
+                        print(f"DEBUG: Successfully restored panel widths")
+                        
+                    except Exception as e:
+                        print(f"DEBUG: Outer error restoring panel widths (attempt {self._panel_width_restore_attempts}): {e}")
+                        import traceback
+                        traceback.print_exc()
+                        if self._panel_width_restore_attempts < max_attempts:
+                            self.root.after(200, restore_panel_widths)
+                
+                # Start restoration process
+                self.root.after(100, restore_panel_widths)
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")

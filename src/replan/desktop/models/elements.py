@@ -29,7 +29,9 @@ class SegmentElement:
         points: Key points defining the selection
         mask: Binary mask array (H x W) where 255 = selected
         color: Display color (RGB tuple)
-        label_position: Where to display the label
+        label_position: Where to display the label (fixed position like "center", "top-left", etc.)
+        label_anchor_offset: Custom offset (dx, dy) from centroid for freeform positioning. 
+                             If set, overrides label_position. None means use label_position.
     """
     element_id: str = ""
     category: str = ""
@@ -38,6 +40,7 @@ class SegmentElement:
     mask: Optional[np.ndarray] = None
     color: Tuple[int, int, int] = (128, 128, 128)
     label_position: str = "center"
+    label_anchor_offset: Optional[Tuple[int, int]] = None  # (dx, dy) offset from centroid
     
     def __post_init__(self):
         if not self.element_id:
@@ -71,13 +74,29 @@ class SegmentElement:
         return int(np.sum(self.mask > 0))
     
     def get_label_position(self) -> Optional[Tuple[int, int]]:
-        """Calculate label position based on label_position setting."""
-        bounds = self.bounds
-        if bounds is None:
+        """
+        Calculate label position based on label_position setting or label_anchor_offset.
+        
+        If label_anchor_offset is set, returns centroid + offset.
+        Otherwise, uses label_position to calculate position relative to bounds.
+        """
+        centroid = self.centroid
+        if centroid is None:
             return None
         
+        cx, cy = centroid
+        
+        # If custom anchor offset is set, use it
+        if self.label_anchor_offset is not None:
+            dx, dy = self.label_anchor_offset
+            return (cx + dx, cy + dy)
+        
+        # Otherwise use fixed label_position
+        bounds = self.bounds
+        if bounds is None:
+            return (cx, cy)
+        
         x1, y1, x2, y2 = bounds
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         
         positions = {
             "top-left": (x1, y1 - 5),
@@ -109,6 +128,7 @@ class SegmentElement:
             "mode": self.mode,
             "points": self.points,
             "label_position": self.label_position,
+            "label_anchor_offset": self.label_anchor_offset,
         }
         
         # For 'auto' and 'rect' modes, we must save the mask
@@ -143,6 +163,10 @@ class SegmentElement:
     def from_dict(cls, data: dict, mask: Optional[np.ndarray] = None,
                   color: Tuple[int, int, int] = (128, 128, 128)) -> "SegmentElement":
         """Deserialize from dictionary."""
+        anchor_offset = data.get("label_anchor_offset")
+        if anchor_offset is not None:
+            anchor_offset = tuple(anchor_offset)
+        
         return cls(
             element_id=data.get("element_id", ""),
             category=data.get("category", ""),
@@ -151,6 +175,7 @@ class SegmentElement:
             mask=mask,
             color=color,
             label_position=data.get("label_position", "center"),
+            label_anchor_offset=anchor_offset,
         )
 
 
