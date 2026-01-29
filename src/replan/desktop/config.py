@@ -82,6 +82,10 @@ class AppSettings:
     auto_collapse_panels: bool = True
     compact_toolbar: bool = False
     
+    # Auto-detection
+    auto_detect_text: bool = False  # Automatically detect text regions when pages are loaded
+    auto_detect_hatch: bool = False  # Automatically detect hatching regions when pages are loaded
+    
     def add_recent_file(self, path: str):
         """Add a file to recent files list."""
         if path in self.recent_files:

@@ -382,3 +382,54 @@ class TestSegmentedObjectSerialization:
         obj = SegmentedObject.from_dict(data)
         # No instances, so no migration
         assert len(obj.instances) == 0
+
+    def test_total_area_with_mixed_masks(self):
+        """Test total_area with elements having mixed mask states."""
+        elem1 = SegmentElement(mask=np.ones((10, 10), dtype=np.uint8) * 255)
+        elem2 = SegmentElement(mask=None)
+        elem3 = SegmentElement(mask=np.ones((5, 5), dtype=np.uint8) * 255)
+        inst = ObjectInstance(elements=[elem1, elem2, elem3])
+        assert inst.total_area == (10 * 10) + (5 * 5)
+
+    def test_add_instance_with_existing_instances(self, sample_object):
+        """Test adding instance when instances already exist."""
+        initial_count = len(sample_object.instances)
+        new_inst = sample_object.add_instance(view_type="side", page_id="page-002")
+        assert len(sample_object.instances) == initial_count + 1
+        assert new_inst.instance_num == initial_count + 1
+
+    def test_get_instance_for_page_multiple_pages(self, multi_instance_object):
+        """Test get_instance_for_page with multiple pages."""
+        inst1 = multi_instance_object.get_instance_for_page("page-001")
+        inst2 = multi_instance_object.get_instance_for_page("page-002")
+        assert inst1 is not None
+        assert inst2 is not None
+        assert inst1.page_id == "page-001"
+        assert inst2.page_id == "page-002"
+
+    def test_element_count_with_nested_instances(self, multi_element_instance):
+        """Test element_count sums across nested instances."""
+        obj = SegmentedObject(instances=[multi_element_instance])
+        assert obj.element_count == 2  # multi_element_instance has 2 elements
+
+    def test_has_grouped_elements_multiple_instances(self, sample_instance, multi_element_instance):
+        """Test has_grouped_elements with mixed instances."""
+        obj = SegmentedObject(instances=[sample_instance, multi_element_instance])
+        assert obj.has_grouped_elements is True
+
+    def test_is_simple_with_grouped_elements(self, multi_element_instance):
+        """Test is_simple is False with grouped elements."""
+        obj = SegmentedObject(instances=[multi_element_instance])
+        assert obj.is_simple is False
+
+    def test_roundtrip_serialization_with_attributes(self, sample_instance):
+        """Test roundtrip serialization preserves attributes."""
+        obj = SegmentedObject(
+            object_id="test-obj",
+            name="R1",
+            category="R",
+            instances=[sample_instance],
+        )
+        data = obj.to_dict()
+        restored = SegmentedObject.from_dict(data, instances=[sample_instance])
+        assert restored.instances[0].attributes.material == sample_instance.attributes.material

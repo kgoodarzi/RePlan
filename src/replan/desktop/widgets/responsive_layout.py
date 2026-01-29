@@ -319,6 +319,24 @@ class ResizableLayout(tk.Frame):
             self.paned.add(self.right_panel_frame, width=self.settings.tree_width, minsize=200)
             for panel in right_panels:
                 panel.pack(fill=tk.BOTH, expand=True)
+            
+            # Bind to paned window sash movement to track panel width changes
+            def on_sash_moved(event=None):
+                if right_panels:
+                    # Get current width of right panel frame
+                    try:
+                        right_width = self.right_panel_frame.winfo_width()
+                        if right_width > 0:
+                            self.settings.tree_width = right_width
+                            # Save settings immediately
+                            from replan.desktop.config import save_settings
+                            save_settings(self.settings)
+                    except:
+                        pass
+            
+            # Bind to paned window configure event to track resize
+            self.paned.bind('<ButtonRelease-1>', on_sash_moved)
+            self.paned.bind('<B1-Motion>', lambda e: self.after_idle(on_sash_moved))
                 
         # Set initial active panel
         if self.panels:

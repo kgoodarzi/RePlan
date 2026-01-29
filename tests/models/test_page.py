@@ -326,3 +326,117 @@ class TestPageTabBackwardCompatibility:
         """Test that groups property returns objects."""
         # groups is an alias for objects
         assert sample_page.groups == sample_page.objects
+
+    def test_get_element_at_point_multiple_objects(self, sample_image):
+        """Test get_element_at_point with multiple overlapping objects."""
+        mask1 = np.zeros((200, 300), dtype=np.uint8)
+        mask1[50:100, 50:100] = 255
+        mask2 = np.zeros((200, 300), dtype=np.uint8)
+        mask2[60:110, 60:110] = 255
+        
+        elem1 = SegmentElement(element_id="elem1", mask=mask1)
+        elem2 = SegmentElement(element_id="elem2", mask=mask2)
+        
+        inst1 = ObjectInstance(
+            instance_id="inst1",
+            elements=[elem1],
+            page_id="page-001",
+        )
+        inst2 = ObjectInstance(
+            instance_id="inst2",
+            elements=[elem2],
+            page_id="page-001",
+        )
+        
+        obj1 = SegmentedObject(object_id="obj1", name="R1", instances=[inst1])
+        obj2 = SegmentedObject(object_id="obj2", name="R2", instances=[inst2])
+        
+        page = PageTab(
+            tab_id="page-001",
+            original_image=sample_image,
+            objects=[obj1, obj2],
+        )
+        
+        # Point (75, 75) is in both masks - should return first match
+        result = page.get_element_at_point(75, 75)
+        assert result is not None
+
+    def test_remove_object_returns_false_for_nonexistent(self, sample_page):
+        """Test remove_object returns False for non-existent object."""
+        initial_count = len(sample_page.objects)
+        result = sample_page.remove_object("nonexistent-id")
+        assert result is False
+        assert len(sample_page.objects) == initial_count
+
+    def test_add_object_multiple_times(self, empty_page):
+        """Test adding multiple objects."""
+        obj1 = SegmentedObject(name="R1", category="R")
+        obj2 = SegmentedObject(name="R2", category="R")
+        obj3 = SegmentedObject(name="F1", category="F")
+        
+        empty_page.add_object(obj1)
+        empty_page.add_object(obj2)
+        empty_page.add_object(obj3)
+        
+        assert len(empty_page.objects) == 3
+        assert empty_page.object_count == 3
+
+    def test_element_count_sums_across_all_objects(self, sample_image):
+        """Test element_count sums elements from all objects."""
+        mask1 = np.zeros((200, 300), dtype=np.uint8)
+        mask1[50:60, 50:60] = 255
+        mask2 = np.zeros((200, 300), dtype=np.uint8)
+        mask2[70:80, 70:80] = 255
+        
+        elem1 = SegmentElement(element_id="elem1", mask=mask1)
+        elem2 = SegmentElement(element_id="elem2", mask=mask2)
+        
+        inst1 = ObjectInstance(elements=[elem1], page_id="page-001")
+        inst2 = ObjectInstance(elements=[elem2], page_id="page-001")
+        
+        obj1 = SegmentedObject(name="R1", instances=[inst1])
+        obj2 = SegmentedObject(name="R2", instances=[inst2])
+        
+        page = PageTab(
+            tab_id="page-001",
+            original_image=sample_image,
+            objects=[obj1, obj2],
+        )
+        
+        assert page.element_count == 2
+
+    def test_pixels_per_inch_with_zero_width(self, sample_image):
+        """Test pixels_per_inch falls back to dpi when pdf_width is zero."""
+        page = PageTab(
+            original_image=sample_image,
+            dpi=200.0,
+            pdf_width_inches=0.0,
+        )
+        assert page.pixels_per_inch == 200.0
+
+    def test_pixels_per_cm_calculation(self, sample_page):
+        """Test pixels_per_cm is correctly calculated from pixels_per_inch."""
+        ppi = sample_page.pixels_per_inch
+        ppc = sample_page.pixels_per_cm
+        expected_ppc = ppi / 2.54
+        assert abs(ppc - expected_ppc) < 0.001
+
+    def test_display_name_with_special_characters(self):
+        """Test display_name handles special characters."""
+        page = PageTab(
+            model_name="Test & Model",
+            page_name="Page 1/2",
+            active=True,
+        )
+        assert "Test & Model" in page.display_name
+        assert "Page 1/2" in page.display_name
+
+    def test_filenames_with_special_characters(self):
+        """Test filename generation handles special characters."""
+        page = PageTab(
+            model_name="Test Model",
+            page_name="Page 1",
+        )
+        # Should replace spaces or handle them appropriately
+        assert "Test" in page.raster_filename
+        assert "Model" in page.raster_filename

@@ -43,17 +43,15 @@ class PDFReader:
             pages = []
             
             for page in doc:
-                pix = page.get_pixmap(dpi=self.dpi)
+                # Use alpha=False for faster rendering (no alpha channel needed)
+                pix = page.get_pixmap(dpi=self.dpi, alpha=False)
                 
-                # Convert to numpy array
+                # Optimize array conversion
                 img = np.frombuffer(pix.samples, dtype=np.uint8)
-                img = img.reshape(pix.height, pix.width, pix.n)
+                img = img.reshape(pix.height, pix.width, 3)  # Always 3 channels (RGB) when alpha=False
                 
-                # Convert to BGR
-                if pix.n == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-                elif pix.n == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                # Convert RGB to BGR (single conversion)
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 
                 # Resize if image is too large to prevent memory issues
                 h, w = img.shape[:2]
@@ -101,18 +99,16 @@ class PDFReader:
                 width_inches = width_pts / 72.0
                 height_inches = height_pts / 72.0
                 
-                # Rasterize
-                pix = page.get_pixmap(dpi=self.dpi)
+                # Rasterize with alpha=False to get RGB directly (faster than RGBA->BGR)
+                pix = page.get_pixmap(dpi=self.dpi, alpha=False)
                 
-                # Convert to numpy array
+                # Optimize array conversion: use direct memory access
+                # pix.samples is a memoryview, convert directly to numpy array
                 img = np.frombuffer(pix.samples, dtype=np.uint8)
-                img = img.reshape(pix.height, pix.width, pix.n)
+                img = img.reshape(pix.height, pix.width, 3)  # Always 3 channels (RGB) when alpha=False
                 
-                # Convert to BGR
-                if pix.n == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-                elif pix.n == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                # Convert RGB to BGR (single conversion, more efficient than RGBA->BGR)
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 
                 # Resize if image is too large to prevent memory issues
                 h, w = img.shape[:2]
@@ -185,15 +181,15 @@ class PDFReader:
                 return None
             
             page = doc[page_num]
-            pix = page.get_pixmap(dpi=self.dpi)
+            # Use alpha=False for faster rendering
+            pix = page.get_pixmap(dpi=self.dpi, alpha=False)
             
+            # Optimize array conversion
             img = np.frombuffer(pix.samples, dtype=np.uint8)
-            img = img.reshape(pix.height, pix.width, pix.n)
+            img = img.reshape(pix.height, pix.width, 3)  # Always 3 channels (RGB) when alpha=False
             
-            if pix.n == 4:
-                img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-            elif pix.n == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            # Convert RGB to BGR (single conversion)
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             
             # Resize if image is too large to prevent memory issues
             h, w = img.shape[:2]

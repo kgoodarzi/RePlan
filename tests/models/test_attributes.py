@@ -185,3 +185,51 @@ class TestMaterialsTypesViews:
         assert "side" in VIEWS
         assert "template" in VIEWS
         assert "cutout" in VIEWS
+
+    def test_negative_dimensions_not_counted(self):
+        """Test that negative dimensions are not counted in has_dimensions."""
+        attrs = ObjectAttributes(width=-5.0, height=-3.0, depth=-1.0)
+        assert attrs.has_dimensions is False
+
+    def test_zero_dimensions_not_counted(self):
+        """Test that zero dimensions are not counted in has_dimensions."""
+        attrs = ObjectAttributes(width=0.0, height=0.0, depth=0.0)
+        assert attrs.has_dimensions is False
+
+    def test_size_string_with_negative_values(self):
+        """Test size_string ignores negative values."""
+        attrs = ObjectAttributes(width=-5.0, height=3.0, depth=-1.0)
+        assert attrs.size_string == "H:3.0"
+
+    def test_size_string_with_zero_values(self):
+        """Test size_string ignores zero values."""
+        attrs = ObjectAttributes(width=0.0, height=5.0, depth=0.0)
+        assert attrs.size_string == "H:5.0"
+
+    def test_from_dict_with_invalid_types(self):
+        """Test from_dict accepts invalid types without crashing."""
+        data = {
+            "width": "invalid",
+            "height": None,
+            "quantity": "not_a_number",
+        }
+        # Should not crash - dataclass accepts whatever is provided
+        attrs = ObjectAttributes.from_dict(data)
+        # Values are passed through as-is (dataclass doesn't validate types)
+        assert attrs.width == "invalid"
+        assert attrs.height is None
+        assert attrs.quantity == "not_a_number"
+
+    def test_to_dict_preserves_all_fields(self, full_attributes):
+        """Test to_dict includes all fields."""
+        data = full_attributes.to_dict()
+        assert "material" in data
+        assert "width" in data
+        assert "height" in data
+        assert "depth" in data
+        assert "obj_type" in data
+        assert "view" in data
+        assert "description" in data
+        assert "url" in data
+        assert "quantity" in data
+        assert "notes" in data

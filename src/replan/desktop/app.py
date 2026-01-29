@@ -54,6 +54,7 @@ from replan.desktop.dialogs import (
     PDFLoaderDialog, LabelScanDialog, AttributeDialog, SettingsDialog, 
     DeleteObjectDialog, PageSelectionDialog, NestingConfigDialog, NestingResultsDialog
 )
+from replan.desktop.dialogs.category_selection import CategorySelectionDialog
 from replan.desktop.core.nesting import NestingEngine, check_rectpack_available
 from replan.desktop.widgets import (
     CollapsibleFrame, PositionGrid,
@@ -156,10 +157,28 @@ class RePlanApp:
         self.root = tk.Tk()
         self.root.title(f"PlanMod Segmenter v{VERSION}")
         # Restore window geometry including position
-        geometry = f"{self.settings.window_width}x{self.settings.window_height}"
-        if self.settings.window_x >= 0 and self.settings.window_y >= 0:
-            geometry += f"+{self.settings.window_x}+{self.settings.window_y}"
-        self.root.geometry(geometry)
+        try:
+            if self.settings.window_maximized:
+                # Set normal size first, then maximize
+                if hasattr(self.settings, '_last_normal_size'):
+                    w, h = self.settings._last_normal_size
+                else:
+                    w, h = self.settings.window_width, self.settings.window_height
+                geometry = f"{w}x{h}"
+                if self.settings.window_x >= 0 and self.settings.window_y >= 0:
+                    geometry += f"+{self.settings.window_x}+{self.settings.window_y}"
+                self.root.geometry(geometry)
+                self.root.update_idletasks()  # Ensure geometry is applied
+                self.root.state('zoomed')  # Windows maximized state
+            else:
+                geometry = f"{self.settings.window_width}x{self.settings.window_height}"
+                if self.settings.window_x >= 0 and self.settings.window_y >= 0:
+                    geometry += f"+{self.settings.window_x}+{self.settings.window_y}"
+                self.root.geometry(geometry)
+        except Exception as e:
+            print(f"Warning: Could not restore window geometry: {e}")
+            # Fallback to default size
+            self.root.geometry(f"{self.settings.window_width}x{self.settings.window_height}")
         
         self._apply_theme()
         self._init_categories()
@@ -636,9 +655,52 @@ class RePlanApp:
                                              font=("Segoe UI", 9))
         self.mark_line_count_label.pack(side=tk.LEFT)
         
+        # Search box
+        search_frame = tk.Frame(content, bg=t["bg"])
+        search_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+        
+        tk.Label(search_frame, text="🔍", bg=t["bg"], fg=t["fg_muted"],
+                font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 4))
+        self.tree_search_var = tk.StringVar()
+        self.tree_search_var.trace("w", lambda *args: self._on_search_changed())
+        search_entry = tk.Entry(search_frame, textvariable=self.tree_search_var,
+                               bg=t["input_bg"], fg=t["fg"], insertbackground=t["fg"],
+                               font=("Segoe UI", 9), relief=tk.FLAT, bd=2,
+                               highlightthickness=1, highlightbackground=t["border"],
+                               highlightcolor=t["input_focus"])
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=2)
+        search_entry.bind("<Escape>", lambda e: self.tree_search_var.set(""))
+        search_entry.bind("<Control-f>", lambda e: search_entry.focus())
+        
+        # Placeholder text hint (shown when empty)
+        self.search_placeholder = tk.Label(search_frame, text="Search objects...", 
+                                          bg=t["input_bg"], fg=t["input_placeholder"],
+                                          font=("Segoe UI", 9))
+        self.search_placeholder.place(in_=search_entry, x=4, y=2)
+        self.search_placeholder.bind("<Button-1>", lambda e: search_entry.focus())
+        
+        def update_placeholder(*args):
+            if self.tree_search_var.get():
+                self.search_placeholder.place_forget()
+            else:
+                if not search_entry.focus_get():
+                    self.search_placeholder.place(in_=search_entry, x=4, y=2)
+        
+        def on_search_focus_in(e):
+            if not self.tree_search_var.get():
+                self.search_placeholder.place_forget()
+        
+        def on_search_focus_out(e):
+            if not self.tree_search_var.get():
+                self.search_placeholder.place(in_=search_entry, x=4, y=2)
+        
+        search_entry.bind("<FocusIn>", on_search_focus_in)
+        search_entry.bind("<FocusOut>", on_search_focus_out)
+        self.tree_search_var.trace("w", update_placeholder)
+        
         # Grouping options
         group_frame = tk.Frame(content, bg=t["bg"])
-        group_frame.pack(fill=tk.X, padx=8, pady=8)
+        group_frame.pack(fill=tk.X, padx=8, pady=4)
         
         tk.Label(group_frame, text="Group by:", bg=t["bg"], fg=t["fg_muted"],
                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
@@ -730,9 +792,16 @@ class RePlanApp:
     def _on_window_resize(self, event):
         """Handle window resize for responsive layout."""
         if event.widget == self.root:
-            # Save window size to settings
-            self.settings.window_width = self.root.winfo_width()
-            self.settings.window_height = self.root.winfo_height()
+            # Save window size to settings (but don't save position on every resize)
+            # Position is saved on close, size can be saved periodically
+            try:
+                self.settings.window_width = self.root.winfo_width()
+                self.settings.window_height = self.root.winfo_height()
+                # Store normal size when not maximized (for restore after unmaximize)
+                if self.root.state() != 'zoomed':
+                    self.settings._last_normal_size = (self.settings.window_width, self.settings.window_height)
+            except:
+                pass
     
     # ... (continuing with essential methods)
     
@@ -1199,6 +1268,24 @@ class RePlanApp:
         self._update_display()
         self._draw_rulers(page)
     
+    def _auto_fit_page_on_first_load(self, page: PageTab):
+        """Auto-fit a page to screen on first load, ensuring canvas is ready."""
+        if not page or page.original_image is None or not hasattr(page, 'canvas'):
+            return
+        
+        # Ensure canvas is updated and has proper size
+        page.canvas.update_idletasks()
+        
+        h, w = page.original_image.shape[:2]
+        cw = max(page.canvas.winfo_width(), 100)
+        ch = max(page.canvas.winfo_height(), 100)
+        
+        # Only auto-fit if we have valid dimensions
+        if cw > 100 and ch > 100 and w > 0 and h > 0:
+            self.zoom_level = min(cw / w, ch / h) * 0.9
+            self._update_display()
+            self._draw_rulers(page)
+    
     def _scroll_with_rulers(self, page: PageTab, direction: str, *args):
         """Scroll canvas and update rulers."""
         if direction == 'h':
@@ -1424,6 +1511,92 @@ class RePlanApp:
         self.renderer.invalidate_cache()
         self._update_display()
     
+    def _auto_detect_text_for_page(self, page: PageTab):
+        """Automatically detect text regions for a page (silent, background operation)."""
+        if not page or page.original_image is None:
+            return
+        
+        # Detect text regions
+        new_regions = self._detect_text_regions(page)
+        
+        if not new_regions:
+            return
+        
+        # Group nearby text regions into logical textboxes/notes
+        # Uses improved algorithm with stricter overlap requirements to avoid over-grouping
+        from replan.desktop.utils.ocr import group_text_regions
+        new_regions = group_text_regions(new_regions, 
+                                        max_horizontal_gap=0.25, 
+                                        max_vertical_gap=0.4, 
+                                        min_group_size=2,
+                                        max_group_size=10)
+        
+        # Get existing region IDs to avoid duplicates
+        existing_ids = set()
+        if hasattr(page, 'auto_text_regions'):
+            existing_ids.update(r.get('id', '') for r in page.auto_text_regions)
+        if hasattr(page, 'manual_text_regions'):
+            existing_ids.update(r.get('id', '') for r in page.manual_text_regions)
+        
+        # Filter out duplicates and add new regions
+        if not hasattr(page, 'auto_text_regions'):
+            page.auto_text_regions = []
+        
+        added_regions = []
+        for region in new_regions:
+            region_id = region.get('id', '')
+            if region_id not in existing_ids:
+                page.auto_text_regions.append(region)
+                existing_ids.add(region_id)
+                added_regions.append(region)
+        
+        if added_regions:
+            # Update combined mask
+            self._update_combined_text_mask(page, force_recompute=True)
+            
+            # Add regions to mark_text category as objects
+            self._add_text_regions_to_category(page, added_regions)
+            
+            self.renderer.invalidate_cache()
+            self._update_display()
+    
+    def _auto_detect_hatch_for_page(self, page: PageTab):
+        """Automatically detect hatching regions for a page (silent, background operation)."""
+        if not page or page.original_image is None:
+            return
+        
+        # Detect hatching regions
+        new_regions = self._detect_hatching_regions(page)
+        
+        if not new_regions:
+            return
+        
+        # Get existing region IDs to avoid duplicates
+        existing_ids = set()
+        if hasattr(page, 'auto_hatch_regions'):
+            existing_ids.update(r.get('id', '') for r in page.auto_hatch_regions)
+        if hasattr(page, 'manual_hatch_regions'):
+            existing_ids.update(r.get('id', '') for r in page.manual_hatch_regions)
+        
+        # Filter out duplicates and add new regions
+        if not hasattr(page, 'auto_hatch_regions'):
+            page.auto_hatch_regions = []
+        
+        added_regions = []
+        for region in new_regions:
+            region_id = region.get('id', '')
+            if region_id not in existing_ids:
+                page.auto_hatch_regions.append(region)
+                existing_ids.add(region_id)
+                added_regions.append(region)
+        
+        if added_regions:
+            # Update combined mask
+            self._update_combined_hatch_mask(page, force_recompute=True)
+            
+            self.renderer.invalidate_cache()
+            self._update_display()
+    
     def _run_ocr_for_page(self):
         """Run OCR on current page and add new text regions to marked text list."""
         page = self._get_current_page()
@@ -1439,6 +1612,15 @@ class RePlanApp:
         if not new_regions:
             self.status_var.set("No text regions detected")
             return
+        
+        # Group nearby text regions into logical textboxes/notes
+        # Uses improved algorithm with stricter overlap requirements to avoid over-grouping
+        from replan.desktop.utils.ocr import group_text_regions
+        new_regions = group_text_regions(new_regions, 
+                                        max_horizontal_gap=0.25, 
+                                        max_vertical_gap=0.4, 
+                                        min_group_size=2,
+                                        max_group_size=10)
         
         # Get existing region IDs to avoid duplicates
         existing_ids = set()
@@ -2084,7 +2266,7 @@ class RePlanApp:
             messagebox.showwarning("No Page", "No page selected.")
             return
         
-        dialog = LabelScanDialog(self.root, [page.original_image], self.theme)
+        dialog = LabelScanDialog(self.root, [page])
         self.root.wait_window(dialog)
         
         if dialog.result:
@@ -2094,6 +2276,7 @@ class RePlanApp:
     def _detect_text_regions(self, page: PageTab) -> list:
         """Detect text regions in image using OCR and return list of regions."""
         import pytesseract
+        import re
         
         image = page.original_image
         h, w = image.shape[:2]
@@ -2106,8 +2289,9 @@ class RePlanApp:
             # Get bounding boxes for detected text - use word level only
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Use PSM 3 (fully automatic page segmentation - default) to find all text elements
-            custom_config = r'--oem 3 --psm 3'
+            # Use PSM 6 (assume uniform block of text) - more restrictive than PSM 3
+            # This reduces false positives from random patterns
+            custom_config = r'--oem 3 --psm 6'
 
             data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, config=custom_config)
 
@@ -2118,21 +2302,65 @@ class RePlanApp:
                 if data['level'][i] != 5:
                     continue
                     
-                # Only consider words with high confidence
+                # Only consider words with high confidence (increased threshold)
                 conf = int(data['conf'][i]) if data['conf'][i] != '-1' else 0
-                if conf < 30:  # Higher confidence threshold
+                if conf < 50:  # Increased from 30 to 50 for better filtering
                     continue
                 
                 # Only consider boxes with reasonable dimensions (not the whole image)
                 x, y, bw, bh = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
                 
-                # Skip if box is too large (> 10% of image) - likely false positive
-                if bw * bh > (w * h * 0.1):
+                # Skip if box is too large (> 5% of image) - stricter threshold
+                if bw * bh > (w * h * 0.05):
                     continue
                 
-                # Skip very small boxes (noise)
-                if bw < 5 or bh < 5:
+                # Skip very small boxes (noise) - increased minimum size
+                if bw < 8 or bh < 8:
                     continue
+                
+                # Filter by aspect ratio - text usually has reasonable aspect ratio
+                # Too wide (likely a line) or too tall (likely noise) should be filtered
+                aspect_ratio = bw / bh if bh > 0 else 0
+                if aspect_ratio > 10 or aspect_ratio < 0.1:
+                    continue
+                
+                # Get detected text
+                text = data['text'][i].strip()
+                
+                # Skip if no actual text content
+                if not text:
+                    continue
+                
+                # Filter out single character detections (often false positives)
+                if len(text) == 1 and text not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789':
+                    continue
+                
+                # Filter out text that's mostly symbols/punctuation (likely not real text)
+                alphanumeric_count = sum(1 for c in text if c.isalnum())
+                if len(text) > 0 and alphanumeric_count / len(text) < 0.5:
+                    continue
+                
+                # Filter out very short text that's just symbols
+                if len(text) <= 2 and not re.match(r'^[A-Z0-9]{1,2}$', text, re.IGNORECASE):
+                    continue
+                
+                # Check pixel density in the region - actual text has higher density
+                x1 = max(0, x)
+                y1 = max(0, y)
+                x2 = min(w, x + bw)
+                y2 = min(h, y + bh)
+                
+                if x2 > x1 and y2 > y1:
+                    region_pixels = gray[y1:y2, x1:x2]
+                    # Calculate dark pixel density (text is usually dark on light background)
+                    # Use adaptive threshold to find dark pixels
+                    _, binary = cv2.threshold(region_pixels, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                    dark_pixel_ratio = np.sum(binary > 0) / (region_pixels.size) if region_pixels.size > 0 else 0
+                    
+                    # Text regions should have reasonable dark pixel density (10-70%)
+                    # Too low = likely background, too high = likely solid shape
+                    if dark_pixel_ratio < 0.1 or dark_pixel_ratio > 0.7:
+                        continue
                 
                 # Add small padding around text
                 padding = 2
@@ -2144,9 +2372,6 @@ class RePlanApp:
                 # Create mask for this region
                 mask = np.zeros((h, w), dtype=np.uint8)
                 mask[y1:y2, x1:x2] = 255
-                
-                # Get detected text
-                text = data['text'][i] if data['text'][i].strip() else f"text_{region_id}"
                 
                 regions.append({
                     'id': f"auto_{region_id}",
@@ -2240,18 +2465,23 @@ class RePlanApp:
     
     # Manual text/hatching region management
     def _add_manual_text_region(self, page: PageTab, mask: np.ndarray, point: tuple, mode: str = "flood"):
-        """Add a manually marked text region."""
+        """Add a manually marked text region and create object in object viewer."""
         if not hasattr(page, 'manual_text_regions'):
             page.manual_text_regions = []
         
         # Store the region with its seed point and mode for reference
-        region_id = len(page.manual_text_regions) + 1
-        page.manual_text_regions.append({
+        region_id = f"manual_{len(page.manual_text_regions) + 1}"
+        region_data = {
             'id': region_id,
             'point': point,
             'mode': mode,
-            'mask': mask.copy()
-        })
+            'mask': mask.copy(),
+            'text': f"text_{region_id}"
+        }
+        page.manual_text_regions.append(region_data)
+        
+        # Create object in object viewer (like OCR does)
+        self._add_text_regions_to_category(page, [region_data])
         
         # Incrementally update combined text mask (much faster than full recompute)
         old_mask = getattr(page, 'combined_text_mask', None)
@@ -2684,7 +2914,11 @@ class RePlanApp:
             # Check if regions have changed
             auto_count = len(getattr(page, 'auto_text_regions', []))
             manual_count = len(getattr(page, 'manual_text_regions', []))
-            current_key = f"{auto_count}_{manual_count}"
+            # Count mark_text objects for this page
+            object_count = sum(1 for obj in self.all_objects 
+                             if obj.category == "mark_text" 
+                             and any(inst.page_id == page.tab_id for inst in obj.instances))
+            current_key = f"{auto_count}_{manual_count}_{object_count}"
             if page._text_mask_cache_key == current_key and hasattr(page, 'combined_text_mask'):
                 # Cache is valid, skip recomputation
                 return
@@ -2724,6 +2958,22 @@ class RePlanApp:
                     else:
                         print(f"Manual text mask shape mismatch: {mask.shape} vs expected {(h, w)}")
         
+        # Add mark_text objects created via rectangle selection (stored in all_objects)
+        object_count = 0
+        object_pixels = 0
+        for obj in self.all_objects:
+            if obj.category == "mark_text":
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            if elem.mask is not None:
+                                if elem.mask.shape == (h, w):
+                                    all_masks.append(elem.mask)
+                                    object_count += 1
+                                    object_pixels += np.sum(elem.mask > 0)
+                                else:
+                                    print(f"Mark_text object mask shape mismatch: {elem.mask.shape} vs expected {(h, w)}")
+        
         # Combine all masks (use batch processing for large numbers to avoid memory issues)
         if all_masks:
             # For large numbers of masks, process in batches to avoid memory allocation errors
@@ -2739,11 +2989,11 @@ class RePlanApp:
         
         total_pixels = np.sum(combined > 0)
         # Store cache key and combined mask
-        page._text_mask_cache_key = f"{auto_count}_{manual_count}"
+        page._text_mask_cache_key = f"{auto_count}_{manual_count}_{object_count}"
         page.combined_text_mask = combined
         
         print(f"_update_combined_text_mask: auto={auto_count} ({auto_pixels}px), "
-              f"manual={manual_count} ({manual_pixels}px), combined={total_pixels}px")
+              f"manual={manual_count} ({manual_pixels}px), objects={object_count} ({object_pixels}px), combined={total_pixels}px")
         # Update working image cache incrementally (handles both addition and removal)
         page = self._get_current_page()
         if page and page.tab_id == self.current_page_id:
@@ -3054,7 +3304,21 @@ class RePlanApp:
         page.v_ruler = v_ruler
         page.ruler_size = ruler_size
         
+        # Auto-detect text regions if enabled and not loading from workspace
+        if self.settings.auto_detect_text and not from_workspace:
+            # Run detection in background to avoid blocking UI
+            self.root.after(100, lambda: self._auto_detect_text_for_page(page))
+        
+        # Auto-detect hatching regions if enabled and not loading from workspace
+        if self.settings.auto_detect_hatch and not from_workspace:
+            # Run detection in background to avoid blocking UI
+            self.root.after(200, lambda: self._auto_detect_hatch_for_page(page))
+        
         self.notebook.add(frame, text=page.display_name)
+        
+        # Track if page has been auto-fitted (for first-time display)
+        if not hasattr(page, '_has_been_fitted'):
+            page._has_been_fitted = False
         
         # Only select and render if this is a new page (not loading from workspace)
         # When loading from workspace, only the active page will be selected/rendered
@@ -3062,8 +3326,11 @@ class RePlanApp:
             self.notebook.select(frame)
             self.current_page_id = page.tab_id
             self.workspace_modified = True
-            # New page - fit to screen
-            self.root.after(300, lambda: (self._zoom_fit(), self._update_display(), self._draw_rulers(page)))
+            # New page - fit to screen on first display
+            if not page._has_been_fitted:
+                # Use longer delay to ensure canvas is properly sized
+                self.root.after(500, lambda: self._auto_fit_page_on_first_load(page))
+                page._has_been_fitted = True
         else:
             # Loading from workspace - don't render yet, will be rendered when selected
             # Only set current_page_id if this is the first page or if it's marked as active
@@ -3081,6 +3348,14 @@ class RePlanApp:
                     # Invalidate cache when switching pages (different page/image)
                     self._invalidate_working_image_cache()
                     self._update_view_menu_labels()  # Update menu for new page
+                    
+                    # Auto-fit on first view if not already fitted
+                    if not hasattr(page, '_has_been_fitted'):
+                        page._has_been_fitted = False
+                    if not page._has_been_fitted and page.original_image is not None:
+                        self.root.after(100, lambda: self._auto_fit_page_on_first_load(page))
+                        page._has_been_fitted = True
+                    
                     self._update_display()
                     self._update_tree()
                     break
@@ -3842,11 +4117,19 @@ class RePlanApp:
         
         # Filter out mark_text/hatch/line objects for rendering (don't draw fill)
         # BUT keep them if they're selected (so they can be highlighted)
+        # IMPORTANT: Only include objects that still exist in all_objects (not deleted)
         render_objects = []
+        existing_obj_ids = {obj.object_id for obj in self.all_objects}
+        
         for obj in page_objects:
+            # Skip if object was deleted
+            if obj.object_id not in existing_obj_ids:
+                continue
+                
             if obj.category == "mark_text":
-                # Only include if selected (for highlighting), regardless of category visibility
-                if obj.object_id in selected_mark_obj_ids:
+                # Only include if category is visible AND object is selected (for highlighting)
+                # When category is hidden, don't render even if selected
+                if not should_hide_text and obj.object_id in selected_mark_obj_ids:
                     render_objects.append(obj)
                     # Debug: check if masks exist
                     has_mask = any(
@@ -3857,12 +4140,12 @@ class RePlanApp:
                     if not has_mask:
                         print(f"WARNING: mark_text object {obj.object_id} selected but has no valid mask")
             elif obj.category == "mark_hatch":
-                # Only include if selected (for highlighting), regardless of category visibility
-                if obj.object_id in selected_mark_obj_ids:
+                # Only include if category is visible AND object is selected (for highlighting)
+                if not should_hide_hatching and obj.object_id in selected_mark_obj_ids:
                     render_objects.append(obj)
             elif obj.category == "mark_line":
-                # Only include if selected (for highlighting), regardless of category visibility
-                if obj.object_id in selected_mark_obj_ids:
+                # Only include if category is visible AND object is selected (for highlighting)
+                if not should_hide_lines and obj.object_id in selected_mark_obj_ids:
                     render_objects.append(obj)
                     # Debug: check if masks exist
                     mask_info = []
@@ -4044,6 +4327,20 @@ class RePlanApp:
         # Get category
         cat_name = self.category_var.get()
         if not cat_name:
+            return
+        
+        # For mark_text category, create object directly from rectangle (don't detect objects)
+        if cat_name == "mark_text":
+            h, w = page.original_image.shape[:2]
+            # Create mask from rectangle
+            mask = np.zeros((h, w), dtype=np.uint8)
+            x_min = max(0, min(w, x_min))
+            x_max = max(0, min(w, x_max))
+            y_min = max(0, min(h, y_min))
+            y_max = max(0, min(h, y_max))
+            mask[y_min:y_max, x_min:x_max] = 255
+            # Create object directly
+            self._create_object_from_mask(page, cat_name, mask)
             return
         
         # Detect connected components in rectangle
@@ -4417,6 +4714,10 @@ class RePlanApp:
             # Add to category using existing _add_element method
             self._add_element(elem)
             
+            # Update combined mask for mark_text objects
+            if cat_name == "mark_text":
+                self._update_combined_text_mask(page, force_recompute=True)
+            
             self.status_var.set(f"Created {cat_name} object from rectangle selection")
     
     def _create_combined_object_from_masks(self, page: PageTab, cat_name: str, 
@@ -4585,7 +4886,7 @@ class RePlanApp:
                         self.object_tree.item(child, open=True)
     
     def _update_tree(self, preserve_state: bool = True, select_object_id: Optional[str] = None):
-        """Full tree rebuild - shows ALL objects across all pages."""
+        """Full tree rebuild - shows ALL objects across all pages (filtered by search if active)."""
         # Save expansion state if requested
         tree_state = None
         if preserve_state:
@@ -4593,39 +4894,55 @@ class RePlanApp:
         
         self.object_tree.delete(*self.object_tree.get_children())
         
-        # Update mark_text, mark_hatch, and mark_line counts
+        # Get search filter
+        search_query = ""
+        if hasattr(self, 'tree_search_var'):
+            search_query = self.tree_search_var.get().strip().lower()
+        
+        # Filter objects based on search query
+        filtered_objects = self.all_objects
+        if search_query:
+            filtered_objects = self._filter_objects_by_search(self.all_objects, search_query)
+        
+        # Update mark_text, mark_hatch, and mark_line counts (use filtered objects)
         if hasattr(self, 'mark_text_count_label'):
-            mark_text_count = sum(1 for o in self.all_objects if o.category == "mark_text")
+            mark_text_count = sum(1 for o in filtered_objects if o.category == "mark_text")
             self.mark_text_count_label.config(text=f"Mark Text: {mark_text_count}")
         
         if hasattr(self, 'mark_hatch_count_label'):
-            mark_hatch_count = sum(1 for o in self.all_objects if o.category == "mark_hatch")
+            mark_hatch_count = sum(1 for o in filtered_objects if o.category == "mark_hatch")
             self.mark_hatch_count_label.config(text=f"Mark Hatch: {mark_hatch_count}")
         
         if hasattr(self, 'mark_line_count_label'):
-            mark_line_count = sum(1 for o in self.all_objects if o.category == "mark_line")
+            mark_line_count = sum(1 for o in filtered_objects if o.category == "mark_line")
             self.mark_line_count_label.config(text=f"Mark Line: {mark_line_count}")
         
         grouping = self.tree_grouping_var.get() if hasattr(self, 'tree_grouping_var') else "category"
         
         if grouping == "none":
-            # Flat list - all objects
-            for obj in self.all_objects:
+            # Flat list - filtered objects
+            for obj in filtered_objects:
                 self._add_tree_item(obj)
         elif grouping == "category":
-            # Group by category
+            # Group by category (using filtered objects)
             categories_used = {}
-            for obj in self.all_objects:
+            for obj in filtered_objects:
                 cat_name = obj.category or "Uncategorized"
                 if cat_name not in categories_used:
                     categories_used[cat_name] = []
                 categories_used[cat_name].append(obj)
             
             for cat_name in sorted(categories_used.keys()):
+                # Skip empty categories (can happen when filtering)
+                if not categories_used[cat_name]:
+                    continue
+                    
                 icon = self._get_tree_icon(cat_name)
                 # Check if this category should be expanded (from saved state)
+                # When searching, auto-expand categories to show results
                 cat_node_id = f"cat_{cat_name}"
-                should_expand = tree_state and cat_node_id in tree_state.get('expanded_items', set())
+                should_expand = (search_query and len(categories_used[cat_name]) > 0) or \
+                               (tree_state and cat_node_id in tree_state.get('expanded_items', set()))
                 cat_node = self.object_tree.insert("", "end", iid=cat_node_id, 
                                                    text=f"📁 {cat_name} ({len(categories_used[cat_name])})",
                                                    image=icon, open=should_expand)
@@ -4633,10 +4950,10 @@ class RePlanApp:
                     self._add_tree_item(obj, parent=cat_node)
         elif grouping == "view":
             # Group by view type - each instance under its own view
-            # Structure: view -> (obj, instance) pairs
+            # Structure: view -> (obj, instance) pairs (using filtered objects)
             views_used = {}
             
-            for obj in self.all_objects:
+            for obj in filtered_objects:
                 for inst in obj.instances:
                     # Get view from instance attributes or view_type
                     view_name = inst.attributes.view or inst.view_type or ""
@@ -4654,6 +4971,10 @@ class RePlanApp:
             
             for view_name in sorted_views:
                 items = views_used[view_name]
+                # Skip empty views (can happen when filtering)
+                if not items:
+                    continue
+                    
                 view_node = self.object_tree.insert("", "end", iid=f"view_{view_name}",
                                                     text=f"👁 {view_name} ({len(items)})",
                                                     open=True)
@@ -4694,6 +5015,79 @@ class RePlanApp:
                     parent = self.object_tree.parent(item_id)
                     if parent and parent.startswith("cat_"):
                         self.object_tree.item(parent, open=True)
+    
+    def _filter_objects_by_search(self, objects: List[SegmentedObject], query: str) -> List[SegmentedObject]:
+        """
+        Filter objects based on search query.
+        
+        Searches in:
+        - Object name
+        - Category name and full name
+        - Element attributes (if available)
+        
+        Args:
+            objects: List of objects to filter
+            query: Search query (lowercase)
+            
+        Returns:
+            Filtered list of objects
+        """
+        if not query:
+            return objects
+        
+        filtered = []
+        query_lower = query.lower()
+        
+        for obj in objects:
+            # Check object name
+            if query_lower in obj.name.lower():
+                filtered.append(obj)
+                continue
+            
+            # Check category name and full name
+            cat = self.categories.get(obj.category)
+            if cat:
+                if query_lower in obj.category.lower() or query_lower in cat.full_name.lower():
+                    filtered.append(obj)
+                    continue
+            
+            # Check instance attributes (material, size, view, etc.)
+            for inst in obj.instances:
+                if inst.attributes:
+                    attrs = inst.attributes
+                    # Check material
+                    if attrs.material and query_lower in attrs.material.lower():
+                        filtered.append(obj)
+                        break
+                    # Check view
+                    if attrs.view and query_lower in attrs.view.lower():
+                        filtered.append(obj)
+                        break
+                    # Check size string
+                    if attrs.size_string and query_lower in attrs.size_string.lower():
+                        filtered.append(obj)
+                        break
+                # Check view_type
+                if inst.view_type and query_lower in inst.view_type.lower():
+                    filtered.append(obj)
+                    break
+            else:
+                # Check if query matches any page ID (for objects on specific pages)
+                for inst in obj.instances:
+                    if query_lower in inst.page_id.lower():
+                        filtered.append(obj)
+                        break
+        
+        return filtered
+    
+    def _on_search_changed(self):
+        """Handle search box text change - update tree with filtered results."""
+        # Debounce: cancel any pending update
+        if hasattr(self, '_search_update_id'):
+            self.root.after_cancel(self._search_update_id)
+        
+        # Schedule update after short delay (debouncing)
+        self._search_update_id = self.root.after(150, lambda: self._update_tree(preserve_state=False))
     
     def _get_tree_icon(self, category: str):
         """Get or create icon for a category."""
@@ -5035,6 +5429,8 @@ class RePlanApp:
                            state="normal" if num_objects >= 1 else "disabled")
             menu.add_command(label="Rename", command=lambda: self._start_inline_edit(f"o_{next(iter(self.selected_object_ids))}") if self.selected_object_ids else None,
                            state="normal" if num_objects == 1 else "disabled")
+            menu.add_command(label="Change Category", command=self._change_object_category,
+                           state="normal" if num_objects >= 1 else "disabled")
             menu.add_command(label="Edit Attributes", command=self._edit_attributes)
             menu.add_command(label="Draw Perimeter", command=self._draw_perimeter,
                            state="normal" if num_objects == 1 else "disabled")
@@ -6627,6 +7023,13 @@ class RePlanApp:
                                                                     if str(r.get('id', '')) != str(elem.element_id)]
             deleted_objs.add(obj_id)
         
+        # Track which categories were deleted before removing objects
+        deleted_categories = set()
+        for obj_id in deleted_objs:
+            obj = self._get_object_by_id(obj_id)
+            if obj:
+                deleted_categories.add(obj.category)
+        
         # Remove deleted objects
         self.all_objects = [o for o in self.all_objects if o.object_id not in deleted_objs]
         
@@ -6636,36 +7039,48 @@ class RePlanApp:
                 deleted_objs.add(obj.object_id)
                 self.all_objects.remove(obj)
         
-        # Update combined masks for affected pages (optimize for mark_line deletion)
+        # Clear selections for deleted objects to prevent visibility issues
+        self.selected_object_ids = {oid for oid in self.selected_object_ids if oid not in deleted_objs}
+        self.selected_instance_ids = {iid for iid in self.selected_instance_ids 
+                                     if not any(oid in deleted_objs for oid in self.selected_object_ids)}
+        self.selected_element_ids = {eid for eid in self.selected_element_ids 
+                                    if not any(oid in deleted_objs for oid in self.selected_object_ids)}
+        
+        # Update combined masks for affected pages
         print(f"DEBUG _delete_selected: Updating masks for {len(page_ids_to_update)} pages")
         import time
         start_time = time.time()
         
+        # Check if mark_text category visibility is currently off (should_hide_text=True)
+        # If so, we need to invalidate cache to ensure deleted objects' pixels are restored
+        mark_text_cat = self.categories.get("mark_text")
+        should_hide_text = mark_text_cat is not None and not mark_text_cat.visible
+        
         for page_id in page_ids_to_update:
             page = self.pages.get(page_id)
             if page:
-                # Only update masks if we actually deleted mark_text/hatch/line objects
-                deleted_mark_text = any(
-                    obj.category == "mark_text" for obj_id in deleted_objs 
-                    for obj in [self._get_object_by_id(obj_id)] if obj
-                )
-                deleted_mark_hatch = any(
-                    obj.category == "mark_hatch" for obj_id in deleted_objs 
-                    for obj in [self._get_object_by_id(obj_id)] if obj
-                )
-                deleted_mark_line = any(
-                    obj.category == "mark_line" for obj_id in deleted_objs 
-                    for obj in [self._get_object_by_id(obj_id)] if obj
-                )
-                
-                if deleted_mark_text and hasattr(page, 'manual_text_regions'):
+                # Update masks if we deleted objects of these categories
+                if "mark_text" in deleted_categories:
                     print(f"DEBUG: Updating text mask for page {page_id}")
+                    # If mark_text visibility is off, invalidate cache to ensure proper restoration
+                    # of deleted objects' pixels when category is unchecked
+                    if should_hide_text and page_id == self.current_page_id:
+                        # Invalidate cache before updating mask to ensure deleted pixels are restored
+                        self._invalidate_working_image_cache()
                     self._update_combined_text_mask(page, force_recompute=True)
-                if deleted_mark_hatch and hasattr(page, 'manual_hatch_regions'):
+                if "mark_hatch" in deleted_categories:
                     print(f"DEBUG: Updating hatch mask for page {page_id}")
+                    mark_hatch_cat = self.categories.get("mark_hatch")
+                    should_hide_hatch = mark_hatch_cat is not None and not mark_hatch_cat.visible
+                    if should_hide_hatch and page_id == self.current_page_id:
+                        self._invalidate_working_image_cache()
                     self._update_combined_hatch_mask(page, force_recompute=True)
-                if deleted_mark_line:
+                if "mark_line" in deleted_categories:
                     print(f"DEBUG: Updating line mask for page {page_id}")
+                    mark_line_cat = self.categories.get("mark_line")
+                    should_hide_line = mark_line_cat is not None and not mark_line_cat.visible
+                    if should_hide_line and page_id == self.current_page_id:
+                        self._invalidate_working_image_cache()
                     # Recompute combined line mask from all remaining objects
                     self._update_combined_line_mask(page, force_recompute=True)
         
@@ -6696,6 +7111,9 @@ class RePlanApp:
         # (Incremental update doesn't work well after objects are removed from all_objects)
         self._update_tree()
         
+        # Force display update to ensure deleted objects are no longer visible
+        self._update_display(immediate=True)
+        
         # Restore tree state (which categories are expanded)
         if hasattr(self, 'tree_grouping_var') and self.tree_grouping_var.get() == "category":
             for item in self.object_tree.get_children():
@@ -6713,6 +7131,98 @@ class RePlanApp:
                 self.object_tree.see(mark_line_cat_id)
         
         self._update_display()
+    
+    def _change_object_category(self):
+        """Change the category of selected objects."""
+        if not self.selected_object_ids:
+            messagebox.showinfo("Info", "Select at least one object to change its category.", parent=self.root)
+            return
+        
+        # Get the first selected object to determine current category
+        first_obj = self._get_object_by_id(next(iter(self.selected_object_ids)))
+        if not first_obj:
+            return
+        
+        current_category = first_obj.category
+        
+        # Show category selection dialog
+        dialog = CategorySelectionDialog(self.root, self.categories, current_category, self.theme)
+        new_category = dialog.result
+        
+        if not new_category:
+            return  # User cancelled
+        
+        # Verify the category exists
+        if new_category not in self.categories:
+            messagebox.showerror("Error", f"Category '{new_category}' not found.", parent=self.root)
+            return
+        
+        # Get the new category info
+        new_cat = self.categories[new_category]
+        new_color = new_cat.color_rgb
+        
+        # Track which pages need mask updates (for mark_text/mark_hatch/mark_line)
+        pages_to_update = set()
+        old_categories_changed = set()
+        new_categories_added = set()
+        
+        # Change category for all selected objects
+        changed_count = 0
+        for obj_id in self.selected_object_ids:
+            obj = self._get_object_by_id(obj_id)
+            if not obj:
+                continue
+            
+            # Track old category
+            old_category = obj.category
+            old_categories_changed.add(old_category)
+            new_categories_added.add(new_category)
+            
+            # Collect pages that need mask updates
+            for inst in obj.instances:
+                pages_to_update.add(inst.page_id)
+            
+            # Update object category
+            obj.category = new_category
+            
+            # Update all elements' categories and colors
+            for inst in obj.instances:
+                for elem in inst.elements:
+                    elem.category = new_category
+                    elem.color = new_color
+            
+            changed_count += 1
+        
+        # Update combined masks for mark_text/mark_hatch/mark_line categories
+        for page_id in pages_to_update:
+            page = self.pages.get(page_id)
+            if not page:
+                continue
+            
+            # Update masks if changing to/from mark categories
+            if "mark_text" in old_categories_changed or "mark_text" in new_categories_added:
+                self._update_combined_text_mask(page, force_recompute=True)
+            if "mark_hatch" in old_categories_changed or "mark_hatch" in new_categories_added:
+                self._update_combined_hatch_mask(page, force_recompute=True)
+            if "mark_line" in old_categories_changed or "mark_line" in new_categories_added:
+                self._update_combined_line_mask(page, force_recompute=True)
+        
+        # Invalidate working image cache if changing to/from mark categories
+        if old_categories_changed.intersection({"mark_text", "mark_hatch", "mark_line"}) or \
+           new_categories_added.intersection({"mark_text", "mark_hatch", "mark_line"}):
+            self._invalidate_working_image_cache()
+        
+        # Update rendering cache and display
+        self.renderer.invalidate_cache()
+        self._update_tree()  # Rebuild tree to reflect category changes
+        self._update_display()
+        self.workspace_modified = True
+        
+        # Show status message
+        if changed_count == 1:
+            self.status_var.set(f"Changed category of '{first_obj.name}' from {current_category} to {new_category}")
+        else:
+            self.status_var.set(f"Changed category of {changed_count} objects from {current_category} to {new_category}")
     
     def _merge_as_instances(self):
         if len(self.selected_object_ids) < 2:
@@ -7449,12 +7959,32 @@ class RePlanApp:
     
     def _get_view_state(self) -> dict:
         """Get current view state for workspace saving."""
+        # Get current panel widths - use actual width from right panel frame if available
+        object_panel_width = self.settings.tree_width
+        
+        # Try to get actual width from the right panel frame
+        if hasattr(self, 'layout') and hasattr(self.layout, 'right_panel_frame'):
+            try:
+                # Force update to get accurate width
+                self.layout.right_panel_frame.update_idletasks()
+                self.root.update_idletasks()
+                actual_width = self.layout.right_panel_frame.winfo_width()
+                # Only use actual width if it's reasonable (not 0 or 1)
+                if actual_width > 50:
+                    object_panel_width = actual_width
+                    # Update settings to keep them in sync
+                    self.settings.tree_width = actual_width
+            except Exception as e:
+                # Fall back to settings value
+                pass
+        
         return {
             "current_page_id": self.current_page_id,
             "zoom_level": self.zoom_level,
             "group_by": self.group_by_var.get() if hasattr(self, 'group_by_var') else "category",
             "show_labels": self.show_labels,
             "current_view": self.current_view_var.get() if hasattr(self, 'current_view_var') else "",
+            "object_panel_width": object_panel_width,
         }
     
     def _restore_view_state(self, view_state: dict):
@@ -7480,6 +8010,113 @@ class RePlanApp:
         if hasattr(self, 'current_view_var'):
             self.current_view_var.set(view_state.get("current_view", ""))
         
+        # Restore object panel width - defer until after layout is fully initialized
+        object_panel_width = view_state.get("object_panel_width")
+        if object_panel_width and object_panel_width > 0 and hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
+            # Track restoration attempts
+            if not hasattr(self, '_panel_width_restore_attempts'):
+                self._panel_width_restore_attempts = 0
+            
+            def restore_panel_width():
+                """Restore panel width by setting sash position in PanedWindow."""
+                self._panel_width_restore_attempts += 1
+                max_attempts = 5
+                
+                try:
+                    if not hasattr(self.layout, 'paned') or not hasattr(self.layout, 'right_panel_frame'):
+                        if self._panel_width_restore_attempts < max_attempts:
+                            self.root.after(200, restore_panel_width)
+                        return
+                    
+                    paned = self.layout.paned
+                    right_panel_frame = self.layout.right_panel_frame
+                    
+                    # Ensure geometry is updated
+                    paned.update_idletasks()
+                    self.root.update_idletasks()
+                    
+                    # Get panes list to find right panel index
+                    panes = paned.panes()
+                    if not panes:
+                        if self._panel_width_restore_attempts < max_attempts:
+                            self.root.after(200, restore_panel_width)
+                        return
+                    
+                    # Find the index of the right panel frame
+                    right_panel_index = None
+                    for i, pane_id in enumerate(panes):
+                        try:
+                            pane_widget = paned.nametowidget(pane_id)
+                            if pane_widget == right_panel_frame:
+                                right_panel_index = i
+                                break
+                        except:
+                            continue
+                    
+                    if right_panel_index is None:
+                        if self._panel_width_restore_attempts < max_attempts:
+                            self.root.after(200, restore_panel_width)
+                        return
+                    
+                    # The sash before the right panel controls its width
+                    # If right panel is at index N, sash index is N-1
+                    if right_panel_index > 0:
+                        sash_index = right_panel_index - 1
+                        
+                        # Get current window width
+                        window_width = paned.winfo_width()
+                        
+                        if window_width <= 0:
+                            if self._panel_width_restore_attempts < max_attempts:
+                                self.root.after(200, restore_panel_width)
+                            return
+                        
+                        # Calculate sash position: window_width - panel_width
+                        # Ensure minimum sizes for other panes (center pane needs at least 400px)
+                        min_center_width = 400
+                        max_panel_width = window_width - min_center_width
+                        target_width = min(object_panel_width, max_panel_width)
+                        sash_position = window_width - target_width
+                        
+                        # Ensure sash position is valid
+                        sash_position = max(min_center_width, min(sash_position, window_width - 200))
+                        
+                        try:
+                            # Get current sash position to verify it's different
+                            current_sash_pos = paned.sashpos(sash_index)
+                            if abs(current_sash_pos - sash_position) > 5:  # Only update if significantly different
+                                paned.sashpos(sash_index, sash_position)
+                                self.settings.tree_width = target_width
+                                save_settings(self.settings)
+                                print(f"DEBUG: Restored object panel width to {target_width}px (sash {sash_index} at {sash_position}, window width {window_width}, was {current_sash_pos})")
+                            else:
+                                # Already at correct position
+                                self.settings.tree_width = target_width
+                                save_settings(self.settings)
+                        except tk.TclError as e:
+                            print(f"DEBUG: Error setting sash position (attempt {self._panel_width_restore_attempts}): {e}")
+                            if self._panel_width_restore_attempts < max_attempts:
+                                self.root.after(200, restore_panel_width)
+                        except Exception as e:
+                            print(f"DEBUG: Unexpected error restoring panel width (attempt {self._panel_width_restore_attempts}): {e}")
+                            if self._panel_width_restore_attempts < max_attempts:
+                                self.root.after(200, restore_panel_width)
+                except Exception as e:
+                    print(f"DEBUG: Error restoring panel width (attempt {self._panel_width_restore_attempts}): {e}")
+                    import traceback
+                    traceback.print_exc()
+                    if self._panel_width_restore_attempts < max_attempts:
+                        self.root.after(200, restore_panel_width)
+            
+            # Reset attempts counter
+            self._panel_width_restore_attempts = 0
+            
+            # Defer restoration until after layout is fully rendered
+            # Use multiple attempts with increasing delays to ensure layout is ready
+            self.root.after(100, restore_panel_width)
+            self.root.after(300, restore_panel_width)
+            self.root.after(500, restore_panel_width)
+        
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")
         if target_page_id and target_page_id in self.pages:
@@ -7493,11 +8130,35 @@ class RePlanApp:
             if r:
                 self._save_workspace()
         
-        # Save window geometry
-        self.settings.window_width = self.root.winfo_width()
-        self.settings.window_height = self.root.winfo_height()
-        self.settings.window_x = self.root.winfo_x()
-        self.settings.window_y = self.root.winfo_y()
+        # Save window geometry and state
+        try:
+            # Check if window is maximized (Windows)
+            if self.root.state() == 'zoomed':
+                self.settings.window_maximized = True
+                # Save current size before maximizing (if available)
+                if hasattr(self.settings, '_last_normal_size'):
+                    self.settings.window_width, self.settings.window_height = self.settings._last_normal_size
+            else:
+                self.settings.window_maximized = False
+                self.settings.window_width = self.root.winfo_width()
+                self.settings.window_height = self.root.winfo_height()
+                self.settings._last_normal_size = (self.settings.window_width, self.settings.window_height)
+            
+            self.settings.window_x = self.root.winfo_x()
+            self.settings.window_y = self.root.winfo_y()
+            
+            # Save settings to persist window geometry
+            save_settings(self.settings)
+        except Exception as e:
+            print(f"Warning: Could not save window geometry: {e}")
+            # Fallback to current size
+            self.settings.window_width = self.root.winfo_width()
+            self.settings.window_height = self.root.winfo_height()
+            try:
+                save_settings(self.settings)
+            except:
+                pass
+        
         save_settings(self.settings)
         self.root.quit()
     

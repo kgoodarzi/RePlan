@@ -49,6 +49,8 @@ class SettingsDialog(BaseDialog):
             
             # Behavior
             "auto_collapse_panels": self.settings.auto_collapse_panels,
+            "auto_detect_text": self.settings.auto_detect_text,
+            "auto_detect_hatch": self.settings.auto_detect_hatch,
         }
     
     def _setup_ui(self):
@@ -258,6 +260,8 @@ class SettingsDialog(BaseDialog):
         self.dpi_var.set(defaults.default_dpi)
         self.density_var.set(defaults.tree_density)
         self.auto_collapse_var.set(defaults.auto_collapse_panels)
+        self.auto_detect_text_var.set(defaults.auto_detect_text)
+        self.auto_detect_hatch_var.set(defaults.auto_detect_hatch)
         
         self.modified = True
     
@@ -276,6 +280,8 @@ class SettingsDialog(BaseDialog):
         self.settings.default_dpi = self.dpi_var.get()
         self.settings.tree_density = self.density_var.get()
         self.settings.auto_collapse_panels = self.auto_collapse_var.get()
+        self.settings.auto_detect_text = self.auto_detect_text_var.get()
+        self.settings.auto_detect_hatch = self.auto_detect_hatch_var.get()
         
         self.result = self.settings
         

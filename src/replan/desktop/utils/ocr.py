@@ -175,6 +175,248 @@ def group_labels(labels: Dict[str, Set[str]]) -> List[Tuple[str, str, List[str]]
     return result
 
 
+def group_text_regions(regions: List[dict], 
+                       max_horizontal_gap: float = 0.25,
+                       max_vertical_gap: float = 0.4,
+                       min_group_size: int = 2,
+                       max_group_size: int = 10) -> List[dict]:
+    """
+    Group nearby text regions into logical textboxes/notes.
+    
+    Uses a two-stage approach:
+    1. First groups regions into lines (horizontally aligned)
+    2. Then groups lines into textboxes (vertically aligned with similar left/right edges)
+    
+    Args:
+        regions: List of text region dicts with 'bbox' (x1, y1, x2, y2) and 'text' keys
+        max_horizontal_gap: Maximum horizontal gap as fraction of average text height (default 0.25)
+        max_vertical_gap: Maximum vertical gap as fraction of average text height (default 0.4)
+        min_group_size: Minimum number of regions to form a group (default 2)
+        max_group_size: Maximum number of regions in a group to prevent over-grouping (default 10)
+        
+    Returns:
+        List of grouped regions. Each group is a dict with:
+        - 'id': Combined ID
+        - 'text': Combined text (space-separated)
+        - 'bbox': Bounding box encompassing all regions in group
+        - 'mask': Combined mask
+        - 'regions': List of original region IDs in this group
+    """
+    if not regions or len(regions) < min_group_size:
+        return regions
+    
+    # Calculate average text height for gap thresholds
+    heights = []
+    for r in regions:
+        bbox = r.get('bbox', (0, 0, 0, 0))
+        if len(bbox) == 4:
+            heights.append(bbox[3] - bbox[1])
+    avg_height = sum(heights) / len(heights) if heights else 20
+    
+    # Convert to list of dicts for easier processing
+    region_data = []
+    for i, r in enumerate(regions):
+        bbox = r.get('bbox', (0, 0, 0, 0))
+        if len(bbox) == 4:
+            x1, y1, x2, y2 = bbox
+            region_data.append({
+                'index': i,
+                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                'cx': (x1 + x2) / 2,  # Center x
+                'cy': (y1 + y2) / 2,  # Center y
+                'width': x2 - x1,
+                'height': y2 - y1,
+                'region': r
+            })
+    
+    if len(region_data) < min_group_size:
+        return regions
+    
+    # Stage 1: Group regions into lines (horizontally aligned)
+    lines = []
+    used_indices = set()
+    
+    for i, r1 in enumerate(region_data):
+        if i in used_indices:
+            continue
+        
+        # Start a new line with this region
+        line = [r1]
+        used_indices.add(i)
+        
+        # Find horizontally aligned regions (same line)
+        for j, r2 in enumerate(region_data):
+            if j in used_indices or j == i:
+                continue
+            
+            # Check if r2 is on the same line as r1
+            y_overlap = min(r1['y2'], r2['y2']) - max(r1['y1'], r2['y1'])
+            y_overlap_ratio = y_overlap / min(r1['height'], r2['height']) if min(r1['height'], r2['height']) > 0 else 0
+            
+            # Require significant vertical overlap (at least 40%) for same line
+            if y_overlap_ratio > 0.4:
+                # Check horizontal gap
+                if r1['x2'] < r2['x1']:
+                    gap = r2['x1'] - r1['x2']
+                elif r2['x2'] < r1['x1']:
+                    gap = r1['x1'] - r2['x2']
+                else:
+                    gap = 0  # Overlapping horizontally
+                
+                # If gap is reasonable, add to line
+                if gap <= avg_height * max_horizontal_gap * 2:  # More lenient for same line
+                    line.append(r2)
+                    used_indices.add(j)
+        
+        # Sort line by x-coordinate (left to right)
+        line.sort(key=lambda x: x['x1'])
+        lines.append(line)
+    
+    # Stage 2: Group lines into textboxes (vertically aligned with similar edges)
+    textboxes = []
+    used_line_indices = set()
+    
+    for i, line1 in enumerate(lines):
+        if i in used_line_indices:
+            continue
+        
+        # Start a new textbox with this line
+        textbox_lines = [line1]
+        used_line_indices.add(i)
+        
+        # Calculate textbox bounds from current lines
+        textbox_x1 = min(r['x1'] for r in line1)
+        textbox_x2 = max(r['x2'] for r in line1)
+        textbox_y1 = min(r['y1'] for r in line1)
+        textbox_y2 = max(r['y2'] for r in line1)
+        
+        # Find other lines that belong to the same textbox
+        changed = True
+        while changed:
+            changed = False
+            for j, line2 in enumerate(lines):
+                if j in used_line_indices or j == i:
+                    continue
+                
+                # Calculate line2 bounds
+                line2_x1 = min(r['x1'] for r in line2)
+                line2_x2 = max(r['x2'] for r in line2)
+                line2_y1 = min(r['y1'] for r in line2)
+                line2_y2 = max(r['y2'] for r in line2)
+                
+                # Check if line2 belongs to the same textbox
+                # Criteria:
+                # 1. Left edges are aligned (within tolerance)
+                # 2. Right edges are aligned (within tolerance) OR significant horizontal overlap
+                # 3. Vertical gap is reasonable
+                
+                left_edge_diff = abs(textbox_x1 - line2_x1)
+                right_edge_diff = abs(textbox_x2 - line2_x2)
+                
+                # Check horizontal overlap
+                x_overlap = min(textbox_x2, line2_x2) - max(textbox_x1, line2_x1)
+                x_overlap_ratio = x_overlap / min(textbox_x2 - textbox_x1, line2_x2 - line2_x1) if min(textbox_x2 - textbox_x1, line2_x2 - line2_x1) > 0 else 0
+                
+                # Check vertical gap
+                if textbox_y2 < line2_y1:
+                    vertical_gap = line2_y1 - textbox_y2
+                elif line2_y2 < textbox_y1:
+                    vertical_gap = textbox_y1 - line2_y2
+                else:
+                    vertical_gap = 0  # Overlapping vertically
+                
+                # Determine if lines belong to same textbox
+                # Left edges aligned AND (right edges aligned OR significant overlap) AND reasonable vertical gap
+                edge_tolerance = avg_height * 0.5  # More lenient for textbox alignment
+                
+                if (left_edge_diff <= edge_tolerance and 
+                    (right_edge_diff <= edge_tolerance or x_overlap_ratio > 0.3) and
+                    vertical_gap <= avg_height * max_vertical_gap * 1.5):  # More lenient for multi-line textboxes
+                    
+                    textbox_lines.append(line2)
+                    used_line_indices.add(j)
+                    changed = True
+                    
+                    # Update textbox bounds
+                    textbox_x1 = min(textbox_x1, line2_x1)
+                    textbox_x2 = max(textbox_x2, line2_x2)
+                    textbox_y1 = min(textbox_y1, line2_y1)
+                    textbox_y2 = max(textbox_y2, line2_y2)
+        
+        # Flatten textbox lines into a single group of regions
+        textbox_regions = []
+        for line in textbox_lines:
+            textbox_regions.extend(line)
+        
+        # Only create textbox if it has minimum size
+        if len(textbox_regions) >= min_group_size and len(textbox_regions) <= max_group_size:
+            textboxes.append(textbox_regions)
+        else:
+            # Return individual regions that don't form valid textboxes
+            for line in textbox_lines:
+                for r in line:
+                    used_indices.discard(r['index'])
+    
+    # Build final groups from textboxes
+    groups = textboxes
+    
+    # Create grouped regions
+    grouped_regions = []
+    
+    # Add grouped regions
+    for group in groups:
+        # Calculate combined bounding box
+        x1 = min(r['x1'] for r in group)
+        y1 = min(r['y1'] for r in group)
+        x2 = max(r['x2'] for r in group)
+        y2 = max(r['y2'] for r in group)
+        
+        # Combine text (space-separated, sorted by position)
+        texts = []
+        for r in sorted(group, key=lambda x: (x['y1'], x['x1'])):  # Sort top-to-bottom, left-to-right
+            text = r['region'].get('text', '').strip()
+            if text:
+                texts.append(text)
+        
+        combined_text = ' '.join(texts) if texts else f"text_group_{len(grouped_regions)}"
+        
+        # Combine masks
+        first_region = group[0]['region']
+        mask = first_region.get('mask')
+        if mask is not None:
+            h, w = mask.shape[:2]
+            combined_mask = np.zeros((h, w), dtype=np.uint8)
+            for r in group:
+                r_mask = r['region'].get('mask')
+                if r_mask is not None and r_mask.shape == (h, w):
+                    combined_mask = np.maximum(combined_mask, r_mask)
+        else:
+            # Create mask from bounding box if no mask available
+            h, w = first_region.get('mask', np.zeros((100, 100))).shape[:2] if first_region.get('mask') is not None else (y2 - y1, x2 - x1)
+            combined_mask = np.zeros((h, w), dtype=np.uint8)
+            combined_mask[y1:min(y2, h), x1:min(x2, w)] = 255
+        
+        # Get region IDs
+        region_ids = [r['region'].get('id', f"region_{r['index']}") for r in group]
+        
+        grouped_regions.append({
+            'id': f"group_{len(grouped_regions)}",
+            'text': combined_text,
+            'bbox': (x1, y1, x2, y2),
+            'mask': combined_mask,
+            'regions': region_ids,
+            'mode': 'auto_grouped',
+            'confidence': max(r['region'].get('confidence', 0) for r in group)
+        })
+    
+    # Add ungrouped regions (regions that didn't form valid textboxes)
+    for i, r_data in enumerate(region_data):
+        if i not in used_indices:
+            grouped_regions.append(r_data['region'])
+    
+    return grouped_regions
+
+
 def scan_pages_for_labels(images: List[np.ndarray],
                           progress_callback: callable = None) -> Dict[str, Set[str]]:
     """

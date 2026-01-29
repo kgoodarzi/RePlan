@@ -66,6 +66,34 @@ class TestSegmentElementBounds:
         elem = SegmentElement(mask=empty_mask)
         assert elem.bounds is None
 
+    def test_bounds_single_pixel(self):
+        """Test bounds with single pixel mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[50, 50] = 255
+        elem = SegmentElement(mask=mask)
+        bounds = elem.bounds
+        assert bounds == (50, 50, 50, 50)
+
+    def test_bounds_mask_with_holes(self):
+        """Test bounds with mask containing holes."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:80, 30:70] = 255
+        mask[40:60, 40:60] = 0  # Create a hole
+        elem = SegmentElement(mask=mask)
+        bounds = elem.bounds
+        # Should still encompass the entire region including the hole
+        assert bounds == (30, 20, 69, 79)
+
+    def test_bounds_scattered_pixels(self):
+        """Test bounds with scattered pixels."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[10, 20] = 255
+        mask[90, 80] = 255
+        mask[50, 50] = 255
+        elem = SegmentElement(mask=mask)
+        bounds = elem.bounds
+        assert bounds == (20, 10, 80, 90)
+
 
 class TestSegmentElementCentroid:
     """Tests for centroid property."""
@@ -89,6 +117,35 @@ class TestSegmentElementCentroid:
         elem = SegmentElement(mask=empty_mask)
         assert elem.centroid is None
 
+    def test_centroid_single_pixel(self):
+        """Test centroid with single pixel mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[50, 50] = 255
+        elem = SegmentElement(mask=mask)
+        centroid = elem.centroid
+        assert centroid == (50, 50)
+
+    def test_centroid_mask_with_holes(self):
+        """Test centroid with mask containing holes."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:80, 30:70] = 255
+        mask[40:60, 40:60] = 0  # Create a hole
+        elem = SegmentElement(mask=mask)
+        centroid = elem.centroid
+        # Should still be near center of bounding box
+        assert 45 <= centroid[0] <= 55
+        assert 45 <= centroid[1] <= 55
+
+    def test_centroid_asymmetric_mask(self):
+        """Test centroid with asymmetric mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[10:30, 20:40] = 255  # Small region at top-left
+        elem = SegmentElement(mask=mask)
+        centroid = elem.centroid
+        # Should be near center of the small region
+        assert 20 <= centroid[0] <= 40
+        assert 10 <= centroid[1] <= 30
+
 
 class TestSegmentElementArea:
     """Tests for area property."""
@@ -109,6 +166,31 @@ class TestSegmentElementArea:
         elem = SegmentElement(mask=empty_mask)
         assert elem.area == 0
 
+    def test_area_single_pixel(self):
+        """Test area with single pixel mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[50, 50] = 255
+        elem = SegmentElement(mask=mask)
+        assert elem.area == 1
+
+    def test_area_mask_with_holes(self):
+        """Test area with mask containing holes."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:80, 30:70] = 255
+        mask[40:60, 40:60] = 0  # Create a hole (20x20)
+        elem = SegmentElement(mask=mask)
+        # Should exclude the hole
+        expected_area = (60 * 40) - (20 * 20)
+        assert elem.area == expected_area
+
+    def test_area_partial_values(self):
+        """Test area with mask containing partial values (not just 0/255)."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:80, 30:70] = 128  # Partial values
+        elem = SegmentElement(mask=mask)
+        # Should count pixels > 0
+        assert elem.area == 60 * 40
+
 
 class TestSegmentElementLabelPosition:
     """Tests for get_label_position method."""
@@ -118,7 +200,11 @@ class TestSegmentElementLabelPosition:
         sample_element.label_position = "center"
         pos = sample_element.get_label_position()
         assert pos is not None
-        # Should be near center of mask
+        x, y = pos
+        # Center should be at (49, 49) for mask at [20:80, 30:70]
+        cx, cy = (30 + 69) // 2, (20 + 79) // 2
+        assert x == cx
+        assert y == cy
 
     def test_top_left_position(self, sample_element):
         """Test top-left label position."""
@@ -126,9 +212,67 @@ class TestSegmentElementLabelPosition:
         pos = sample_element.get_label_position()
         assert pos is not None
         x, y = pos
-        # Top-left should be near (30, 15) for mask at [20:80, 30:70]
+        # Top-left should be at (30, 15) for mask at [20:80, 30:70]
         assert x == 30
         assert y == 15  # y1 - 5
+
+    def test_top_center_position(self, sample_element):
+        """Test top-center label position."""
+        sample_element.label_position = "top-center"
+        pos = sample_element.get_label_position()
+        assert pos is not None
+        x, y = pos
+        cx = (30 + 69) // 2
+        assert x == cx
+        assert y == 15  # y1 - 5
+
+    def test_top_right_position(self, sample_element):
+        """Test top-right label position."""
+        sample_element.label_position = "top-right"
+        pos = sample_element.get_label_position()
+        assert pos is not None
+        x, y = pos
+        assert x == 69  # x2
+        assert y == 15  # y1 - 5
+
+    def test_middle_left_position(self, sample_element):
+        """Test middle-left label position."""
+        sample_element.label_position = "middle-left"
+        pos = sample_element.get_label_position()
+        assert pos is not None
+        x, y = pos
+        cy = (20 + 79) // 2
+        assert x == 25  # x1 - 5
+        assert y == cy
+
+    def test_middle_right_position(self, sample_element):
+        """Test middle-right label position."""
+        sample_element.label_position = "middle-right"
+        pos = sample_element.get_label_position()
+        assert pos is not None
+        x, y = pos
+        cy = (20 + 79) // 2
+        assert x == 74  # x2 + 5
+        assert y == cy
+
+    def test_bottom_left_position(self, sample_element):
+        """Test bottom-left label position."""
+        sample_element.label_position = "bottom-left"
+        pos = sample_element.get_label_position()
+        assert pos is not None
+        x, y = pos
+        assert x == 30  # x1
+        assert y == 94  # y2 + 15
+
+    def test_bottom_center_position(self, sample_element):
+        """Test bottom-center label position."""
+        sample_element.label_position = "bottom-center"
+        pos = sample_element.get_label_position()
+        assert pos is not None
+        x, y = pos
+        cx = (30 + 69) // 2
+        assert x == cx
+        assert y == 94  # y2 + 15
 
     def test_bottom_right_position(self, sample_element):
         """Test bottom-right label position."""
@@ -136,7 +280,6 @@ class TestSegmentElementLabelPosition:
         pos = sample_element.get_label_position()
         assert pos is not None
         x, y = pos
-        # Bottom-right
         assert x == 69  # x2
         assert y == 94  # y2 + 15
 
@@ -145,6 +288,11 @@ class TestSegmentElementLabelPosition:
         sample_element.label_position = "invalid"
         pos = sample_element.get_label_position()
         assert pos is not None
+        # Should default to center
+        cx, cy = (30 + 69) // 2, (20 + 79) // 2
+        x, y = pos
+        assert x == cx
+        assert y == cy
 
     def test_none_mask_returns_none(self):
         """Test get_label_position returns None with no mask."""
@@ -177,6 +325,30 @@ class TestSegmentElementContainsPoint:
         """Test contains_point returns False with no mask."""
         elem = SegmentElement()
         assert elem.contains_point(50, 50) is False
+
+    def test_point_on_boundary(self, sample_element):
+        """Test point on mask boundary."""
+        # Mask is filled from [20:80, 30:70]
+        assert sample_element.contains_point(30, 20) == True  # Top-left corner
+        assert sample_element.contains_point(69, 79) == True  # Bottom-right corner
+        assert sample_element.contains_point(29, 20) == False  # Just outside
+        assert sample_element.contains_point(70, 79) == False  # Just outside
+
+    def test_point_in_hole(self):
+        """Test point in a hole within the mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:80, 30:70] = 255
+        mask[40:60, 40:60] = 0  # Create a hole
+        elem = SegmentElement(mask=mask)
+        assert elem.contains_point(50, 50) == False  # In the hole
+        assert elem.contains_point(35, 25) == True  # Outside the hole
+
+    def test_point_with_partial_value(self):
+        """Test point with partial mask value."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[50, 50] = 128  # Partial value
+        elem = SegmentElement(mask=mask)
+        assert elem.contains_point(50, 50) == True  # Should be > 0
 
 
 class TestSegmentElementSerialization:
@@ -219,6 +391,95 @@ class TestSegmentElementSerialization:
         data = elem.to_dict()
         assert "mask_rle" in data
         assert "mask_bbox" in data
+
+    def test_rle_encoding_structure(self, sample_mask):
+        """Test RLE encoding produces correct structure."""
+        elem = SegmentElement(
+            element_id="rle-test",
+            mode="auto",
+            mask=sample_mask,
+        )
+        data = elem.to_dict()
+        
+        # Check structure
+        assert "mask_rle" in data
+        assert "mask_bbox" in data
+        assert "mask_shape" in data
+        
+        # Check bbox format
+        bbox = data["mask_bbox"]
+        assert len(bbox) == 4
+        assert all(isinstance(x, int) for x in bbox)
+        
+        # Check shape format
+        shape = data["mask_shape"]
+        assert len(shape) == 2
+        assert all(isinstance(x, int) for x in shape)
+        
+        # Check RLE format
+        rle = data["mask_rle"]
+        assert isinstance(rle, list)
+        assert len(rle) > 0
+        for run in rle:
+            assert isinstance(run, list)
+            assert len(run) == 2
+            assert isinstance(run[0], int)  # value
+            assert isinstance(run[1], int)  # count
+
+    def test_rle_encoding_correctness(self, sample_mask):
+        """Test RLE encoding produces correct values."""
+        elem = SegmentElement(
+            element_id="rle-test",
+            mode="auto",
+            mask=sample_mask,
+        )
+        data = elem.to_dict()
+        
+        # Decode RLE to verify correctness
+        bbox = data["mask_bbox"]
+        shape = data["mask_shape"]
+        rle = data["mask_rle"]
+        
+        # Reconstruct flat array
+        flat = []
+        for val, count in rle:
+            flat.extend([val] * count)
+        
+        # Reshape and place in full mask
+        cropped = np.array(flat, dtype=np.uint8).reshape(shape)
+        x1, y1, x2, y2 = bbox
+        reconstructed = np.zeros((100, 100), dtype=np.uint8)
+        reconstructed[y1:y2, x1:x2] = cropped
+        
+        # Compare with original (only in the bbox region)
+        original_cropped = sample_mask[y1:y2, x1:x2]
+        np.testing.assert_array_equal(reconstructed[y1:y2, x1:x2], original_cropped)
+
+    def test_rle_encoding_empty_mask(self):
+        """Test RLE encoding with empty mask."""
+        empty_mask = np.zeros((100, 100), dtype=np.uint8)
+        elem = SegmentElement(
+            element_id="empty-rle",
+            mode="auto",
+            mask=empty_mask,
+        )
+        data = elem.to_dict()
+        # Empty mask should not include RLE data
+        assert "mask_rle" not in data
+        assert "mask_bbox" not in data
+
+    def test_rle_encoding_single_pixel(self):
+        """Test RLE encoding with single pixel mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[50, 50] = 255
+        elem = SegmentElement(
+            element_id="single-pixel",
+            mode="auto",
+            mask=mask,
+        )
+        data = elem.to_dict()
+        assert "mask_rle" in data
+        assert "mask_bbox" == [50, 50, 51, 51] or data["mask_bbox"] == [50, 50, 51, 51]
 
     def test_from_dict_basic(self):
         """Test basic deserialization."""
