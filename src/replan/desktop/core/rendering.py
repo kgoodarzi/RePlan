@@ -157,10 +157,20 @@ class Renderer:
         
         # Apply zoom (use cache if available and no dynamic elements)
         if zoom != 1.0:
+            # Check zoom cache first
+            if zoom in self.cache.zoomed_cache and not (selected_object_ids or selected_instance_ids or selected_element_ids or pending_elements):
+                # Use cached zoomed version if no dynamic elements
+                return self.cache.zoomed_cache[zoom]
+            
             new_w = max(1, int(w * zoom))
             new_h = max(1, int(h * zoom))
+            # Use faster interpolation for downscaling, linear for upscaling
             interp = cv2.INTER_AREA if zoom < 1.0 else cv2.INTER_LINEAR
             blended = cv2.resize(blended, (new_w, new_h), interpolation=interp)
+            
+            # Cache zoomed version if no dynamic elements
+            if not (selected_object_ids or selected_instance_ids or selected_element_ids or pending_elements):
+                self.cache.zoomed_cache[zoom] = blended.copy()
         
         return blended
     

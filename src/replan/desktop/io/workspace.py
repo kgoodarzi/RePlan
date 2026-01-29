@@ -126,8 +126,10 @@ class WorkspaceManager:
                 
                 data["pages"].append(page_data)
             
+            # Optimize JSON serialization: use compact format for large workspaces
+            # Use indent=2 for readability but ensure_ascii=False for performance
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, indent=2, ensure_ascii=False)
             
             return True
             

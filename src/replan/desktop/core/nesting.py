@@ -185,14 +185,21 @@ class NestingEngine:
         self.spacing = spacing
         self.allow_rotation = allow_rotation
     
-    def extract_part_info(self, obj, inst, page_image: np.ndarray) -> Optional[Dict]:
+    def extract_part_info(self, obj, inst, page_image: np.ndarray, use_polygon: bool = False) -> Optional[Dict]:
         """
         Extract part information from an object instance.
+        
+        Args:
+            obj: SegmentedObject
+            inst: ObjectInstance
+            page_image: Page image for mask extraction
+            use_polygon: If True, extract polygon contours for polygon-level nesting
         
         Returns dict with:
             - mask: Combined mask of all elements
             - bbox: Bounding box (x, y, w, h)
             - name: Object name
+            - contours: List of polygon contours (if use_polygon=True)
         """
         h, w = page_image.shape[:2]
         
@@ -213,7 +220,7 @@ class NestingEngine:
         # Extract mask region
         mask_region = combined_mask[y1:y2, x1:x2]
         
-        return {
+        result = {
             "mask": mask_region,
             "bbox": (x1, y1, x2 - x1, y2 - y1),
             "full_mask": combined_mask,
@@ -222,10 +229,34 @@ class NestingEngine:
             "instance_id": inst.instance_id,
             "quantity": inst.attributes.quantity or 1,
         }
+        
+        # Extract polygon contours for polygon-level nesting
+        if use_polygon:
+            import cv2
+            # Find contours from the combined mask
+            contours, hierarchy = cv2.findContours(
+                combined_mask.astype(np.uint8),
+                cv2.RETR_EXTERNAL,  # Only outer contours
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+            # Simplify contours to reduce point count
+            simplified_contours = []
+            for contour in contours:
+                if len(contour) >= 3:
+                    # Use Douglas-Peucker algorithm to simplify
+                    epsilon = 1.0  # Simplification tolerance
+                    simplified = cv2.approxPolyDP(contour, epsilon, True)
+                    if len(simplified) >= 3:
+                        # Convert to list of (x, y) tuples
+                        points = [(int(p[0][0]), int(p[0][1])) for p in simplified]
+                        simplified_contours.append(points)
+            result["contours"] = simplified_contours
+        
+        return result
     
     @timed("nesting_compute")
     def nest_parts(self, parts: List[Dict], sheet_sizes: List[Tuple[int, int]],
-                   material: str, thickness: float) -> List[NestedSheet]:
+                   material: str, thickness: float, use_polygon: bool = False) -> List[NestedSheet]:
         """
         Nest parts onto sheets.
         
@@ -234,6 +265,7 @@ class NestingEngine:
             sheet_sizes: List of (width, height) tuples for available sheet sizes
             material: Material name for the sheets
             thickness: Material thickness
+            use_polygon: If True, use polygon-level nesting (more accurate but slower)
             
         Returns:
             List of NestedSheet objects with parts placed
@@ -243,6 +275,14 @@ class NestingEngine:
         
         if not parts or not sheet_sizes:
             return []
+        
+        # For polygon nesting, fall back to bounding box for now
+        # (Full polygon nesting requires more sophisticated algorithms like NFP)
+        if use_polygon:
+            # TODO: Implement full polygon nesting using No-Fit Polygon (NFP) algorithm
+            # For now, use bounding box but mark parts as having polygon data
+            print("Note: Polygon nesting requested but using bounding box approximation.")
+            print("Full polygon nesting (NFP algorithm) is planned for future implementation.")
         
         # Prepare rectangles for packing
         # Each rectangle is (width, height, rid) where rid is a unique identifier

@@ -794,11 +794,28 @@ class RePlanApp:
         self.root.bind("<Control-b>", lambda e: self.layout._on_panel_toggle("tools"))
         self.root.bind("<Control-j>", lambda e: self.layout._on_panel_toggle("objects"))
         
-        # Zoom shortcuts
-        self.root.bind("<Control-plus>", lambda e: self._zoom_in())
-        self.root.bind("<Control-equal>", lambda e: self._zoom_in())  # For keyboards without numpad
-        self.root.bind("<Control-minus>", lambda e: self._zoom_out())
-        self.root.bind("<Control-0>", lambda e: self._zoom_fit())
+        # Zoom shortcuts - ensure they work even when canvas doesn't have focus
+        def _zoom_in_handler(event=None):
+            if not self._is_text_input_focused():
+                self._zoom_in()
+                return "break"
+        
+        def _zoom_out_handler(event=None):
+            if not self._is_text_input_focused():
+                self._zoom_out()
+                return "break"
+        
+        def _zoom_fit_handler(event=None):
+            if not self._is_text_input_focused():
+                self._zoom_fit()
+                return "break"
+        
+        self.root.bind("<Control-plus>", _zoom_in_handler)
+        self.root.bind("<Control-equal>", _zoom_in_handler)  # For keyboards without numpad
+        self.root.bind("<Control-minus>", _zoom_out_handler)
+        self.root.bind("<Control-0>", _zoom_fit_handler)
+        # Also bind to canvas for when it has focus
+        # (will be bound per-page in _add_page)
         # Page deletion shortcuts
         self.root.bind("<Control-Delete>", lambda e: self._delete_current_page())
         self.notebook.bind("<Delete>", lambda e: self._delete_current_page())
@@ -3698,19 +3715,20 @@ class RePlanApp:
             self._draw_rulers(page)
         
         def _bind_canvas_scroll(event):
-            canvas.bind_all("<MouseWheel>", _canvas_mousewheel)
-            canvas.bind_all("<Control-MouseWheel>", _canvas_mousewheel)  # Explicit Ctrl+mouse wheel
-            canvas.bind_all("<Shift-MouseWheel>", _canvas_mousewheel_horizontal)
+            # Use canvas-specific binding instead of bind_all to avoid focus issues
+            canvas.bind("<MouseWheel>", _canvas_mousewheel)
+            canvas.bind("<Control-MouseWheel>", _canvas_mousewheel)  # Explicit Ctrl+mouse wheel
+            canvas.bind("<Shift-MouseWheel>", _canvas_mousewheel_horizontal)
             # For mice with horizontal scroll (tilt wheel)
-            canvas.bind_all("<Shift-Button-4>", lambda e: canvas.xview_scroll(-1, "units"))
-            canvas.bind_all("<Shift-Button-5>", lambda e: canvas.xview_scroll(1, "units"))
+            canvas.bind("<Shift-Button-4>", lambda e: canvas.xview_scroll(-1, "units"))
+            canvas.bind("<Shift-Button-5>", lambda e: canvas.xview_scroll(1, "units"))
         
         def _unbind_canvas_scroll(event):
-            canvas.unbind_all("<MouseWheel>")
-            canvas.unbind_all("<Control-MouseWheel>")
-            canvas.unbind_all("<Shift-MouseWheel>")
-            canvas.unbind_all("<Shift-Button-4>")
-            canvas.unbind_all("<Shift-Button-5>")
+            canvas.unbind("<MouseWheel>")
+            canvas.unbind("<Control-MouseWheel>")
+            canvas.unbind("<Shift-MouseWheel>")
+            canvas.unbind("<Shift-Button-4>")
+            canvas.unbind("<Shift-Button-5>")
         
         canvas.bind("<Enter>", _bind_canvas_scroll)
         canvas.bind("<Leave>", _unbind_canvas_scroll)
