@@ -52,7 +52,8 @@ from replan.desktop.core import SegmentationEngine, Renderer
 from replan.desktop.io import WorkspaceManager, PDFReader
 from replan.desktop.dialogs import (
     PDFLoaderDialog, LabelScanDialog, AttributeDialog, SettingsDialog, 
-    DeleteObjectDialog, PageSelectionDialog, NestingConfigDialog, NestingResultsDialog
+    DeleteObjectDialog, PageSelectionDialog, NestingConfigDialog, NestingResultsDialog,
+    TransformDialog
 )
 from replan.desktop.dialogs.category_selection import CategorySelectionDialog
 from replan.desktop.core.nesting import NestingEngine, check_rectpack_available
@@ -798,6 +799,22 @@ class RePlanApp:
         self.root.bind("<Control-equal>", lambda e: self._zoom_in())  # For keyboards without numpad
         self.root.bind("<Control-minus>", lambda e: self._zoom_out())
         self.root.bind("<Control-0>", lambda e: self._zoom_fit())
+        # Page deletion shortcuts
+        self.root.bind("<Control-Delete>", lambda e: self._delete_current_page())
+        self.notebook.bind("<Delete>", lambda e: self._delete_current_page())
+        # Tool shortcuts
+        self.root.bind("<s>", lambda e: self._set_mode("select") if not self._is_text_input_focused() else None)
+        self.root.bind("<f>", lambda e: self._set_mode("flood") if not self._is_text_input_focused() else None)
+        self.root.bind("<p>", lambda e: self._set_mode("polyline") if not self._is_text_input_focused() else None)
+        self.root.bind("<b>", lambda e: self._set_mode("freeform") if not self._is_text_input_focused() else None)
+        self.root.bind("<l>", lambda e: self._set_mode("line") if not self._is_text_input_focused() else None)
+        self.root.bind("<r>", lambda e: self._set_mode("rect") if not self._is_text_input_focused() else None)
+        # Selection shortcuts
+        self.root.bind("<Control-a>", lambda e: self._select_all() if not self._is_text_input_focused() else None)
+        self.root.bind("<Control-d>", lambda e: self._deselect_all() if not self._is_text_input_focused() else None)
+        # Delete shortcut (only when not in text input)
+        self.root.bind("<Delete>", lambda e: self._delete_selected() if not self._is_text_input_focused() else None)
+        self.root.bind("<BackSpace>", lambda e: self._delete_selected() if not self._is_text_input_focused() else None)
         
         # Window resize tracking
         self.root.bind("<Configure>", self._on_window_resize)
@@ -1134,6 +1151,42 @@ class RePlanApp:
         self._refresh_categories()
         self.category_var.set(name)  # Select the new category
         self.status_var.set(f"Added category: {name}")
+    
+    def _is_text_input_focused(self) -> bool:
+        """Check if a text input widget currently has focus."""
+        focused = self.root.focus_get()
+        if focused is None:
+            return False
+        widget_type = focused.winfo_class()
+        return widget_type in ("Entry", "Text", "TEntry", "TText")
+    
+    def _select_all(self):
+        """Select all objects on the current page."""
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        # Select all objects that have instances on this page
+        self.selected_object_ids.clear()
+        self.selected_instance_ids.clear()
+        self.selected_element_ids.clear()
+        
+        for obj in self.all_objects:
+            if any(inst.page_id == page.tab_id for inst in obj.instances):
+                self.selected_object_ids.add(obj.object_id)
+        
+        self._update_tree()
+        self._update_display()
+        self.status_var.set(f"Selected {len(self.selected_object_ids)} object(s)")
+    
+    def _deselect_all(self):
+        """Deselect all objects."""
+        self.selected_object_ids.clear()
+        self.selected_instance_ids.clear()
+        self.selected_element_ids.clear()
+        self._update_tree()
+        self._update_display()
+        self.status_var.set("Deselected all")
     
     def _set_mode(self, mode: str):
         self.current_mode = mode
@@ -3681,6 +3734,28 @@ class RePlanApp:
         
         self.notebook.add(frame, text=page.display_name)
         
+        # Store frame reference in page for later deletion
+        page.frame = frame
+        
+        # Add context menu to tab for page deletion
+        def _on_tab_right_click(event):
+            # Find which tab was right-clicked
+            try:
+                tab_index = self.notebook.index(f"@{event.x},{event.y}")
+                if tab_index is not None and tab_index >= 0:
+                    # Get the frame at this index
+                    tab_frame = self.notebook.nametowidget(self.notebook.tabs()[tab_index])
+                    # Find the page for this frame
+                    for page_id, p in self.pages.items():
+                        if hasattr(p, 'frame') and p.frame == tab_frame:
+                            self._show_page_context_menu(event, page_id)
+                            break
+            except Exception as e:
+                print(f"Error showing page context menu: {e}")
+        
+        # Bind right-click to notebook tabs (need to bind to the tab area)
+        self.notebook.bind("<Button-3>", _on_tab_right_click)
+        
         # Track if page has been auto-fitted (for first-time display)
         if not hasattr(page, '_has_been_fitted'):
             page._has_been_fitted = False
@@ -5881,6 +5956,16 @@ class RePlanApp:
                            state="normal" if num_objects >= 1 else "disabled")
             menu.add_command(label="Move to Page", command=self._move_object_to_page,
                            state="normal" if num_objects >= 1 else "disabled")
+            # Transformation submenu
+            transform_menu = tk.Menu(menu, tearoff=0, bg=self.theme["menu_bg"], 
+                                    fg=self.theme["menu_fg"],
+                                    activebackground=self.theme["menu_hover"],
+                                    activeforeground=self.theme["selection_fg"])
+            transform_menu.add_command(label="Scale...", command=lambda: self._transform_selected("scale"))
+            transform_menu.add_command(label="Rotate...", command=lambda: self._transform_selected("rotate"))
+            transform_menu.add_command(label="Mirror...", command=lambda: self._transform_selected("mirror"))
+            menu.add_cascade(label="Transform", menu=transform_menu,
+                           state="normal" if num_objects >= 1 or num_instances >= 1 or num_elements >= 1 else "disabled")
             menu.add_command(label="Rename", command=lambda: self._start_inline_edit(f"o_{next(iter(self.selected_object_ids))}") if self.selected_object_ids else None,
                            state="normal" if num_objects == 1 else "disabled")
             menu.add_command(label="Change Category", command=self._change_object_category,
@@ -6327,10 +6412,15 @@ class RePlanApp:
             messagebox.showinfo("Info", "Object is already on this page.")
             return
         
-        # Get dimensions for both pages to handle resizing if needed
+        # Get dimensions and DPI for both pages to handle resizing if needed
         src_h, src_w = current_page.original_image.shape[:2]
         dst_h, dst_w = target_page.original_image.shape[:2]
         needs_resize = (src_h != dst_h) or (src_w != dst_w)
+        
+        # Calculate scale factor based on pixels_per_inch ratio to preserve physical size
+        src_ppi = current_page.pixels_per_inch
+        dst_ppi = target_page.pixels_per_inch
+        physical_scale = dst_ppi / src_ppi if src_ppi > 0 else 1.0
         
         # Move instances of selected objects to the target page
         moved_count = 0
@@ -6345,17 +6435,25 @@ class RePlanApp:
                     # Update page ID
                     inst.page_id = target_page_id
                     
-                    # Resize masks if pages have different dimensions
-                    if needs_resize:
+                    # Preserve physical size attributes (width, height, depth)
+                    # These represent physical dimensions and should not change
+                    if inst.attributes:
+                        # Attributes already have physical dimensions, keep them as-is
+                        pass
+                    
+                    # Resize masks and points using physical scale to maintain physical size
+                    if needs_resize or abs(physical_scale - 1.0) > 0.001:
+                        scale_factor = physical_scale
                         for elem in inst.elements:
                             if elem.mask is not None and elem.mask.shape == (src_h, src_w):
-                                # Resize mask to fit target page
-                                elem.mask = cv2.resize(elem.mask, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+                                # Calculate new dimensions based on physical scale
+                                new_w = int(src_w * scale_factor)
+                                new_h = int(src_h * scale_factor)
+                                # Resize mask to maintain physical size
+                                elem.mask = cv2.resize(elem.mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
                             # Also adjust points if they exist
                             if elem.points:
-                                scale_x = dst_w / src_w
-                                scale_y = dst_h / src_h
-                                elem.points = [(int(px * scale_x), int(py * scale_y)) for px, py in elem.points]
+                                elem.points = [(int(px * scale_factor), int(py * scale_factor)) for px, py in elem.points]
                     
                     moved_count += 1
         
@@ -6407,10 +6505,15 @@ class RePlanApp:
             messagebox.showinfo("Info", "Instance is already on this page.")
             return
         
-        # Get dimensions for both pages to handle resizing if needed
+        # Get dimensions and DPI for both pages to handle resizing if needed
         src_h, src_w = current_page.original_image.shape[:2]
         dst_h, dst_w = target_page.original_image.shape[:2]
         needs_resize = (src_h != dst_h) or (src_w != dst_w)
+        
+        # Calculate scale factor based on pixels_per_inch ratio to preserve physical size
+        src_ppi = current_page.pixels_per_inch
+        dst_ppi = target_page.pixels_per_inch
+        physical_scale = dst_ppi / src_ppi if src_ppi > 0 else 1.0
         
         # Move selected instances to the target page
         moved_count = 0
@@ -6421,17 +6524,25 @@ class RePlanApp:
                         # Update page ID
                         inst.page_id = target_page_id
                         
-                        # Resize masks if pages have different dimensions
-                        if needs_resize:
+                        # Preserve physical size attributes (width, height, depth)
+                        # These represent physical dimensions and should not change
+                        if inst.attributes:
+                            # Attributes already have physical dimensions, keep them as-is
+                            pass
+                        
+                        # Resize masks and points using physical scale to maintain physical size
+                        if needs_resize or abs(physical_scale - 1.0) > 0.001:
+                            scale_factor = physical_scale
                             for elem in inst.elements:
                                 if elem.mask is not None and elem.mask.shape == (src_h, src_w):
-                                    # Resize mask to fit target page
-                                    elem.mask = cv2.resize(elem.mask, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+                                    # Calculate new dimensions based on physical scale
+                                    new_w = int(src_w * scale_factor)
+                                    new_h = int(src_h * scale_factor)
+                                    # Resize mask to maintain physical size
+                                    elem.mask = cv2.resize(elem.mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
                                 # Also adjust points if they exist
                                 if elem.points:
-                                    scale_x = dst_w / src_w
-                                    scale_y = dst_h / src_h
-                                    elem.points = [(int(px * scale_x), int(py * scale_y)) for px, py in elem.points]
+                                    elem.points = [(int(px * scale_factor), int(py * scale_factor)) for px, py in elem.points]
                         
                         moved_count += 1
                         break
@@ -6455,6 +6566,119 @@ class RePlanApp:
             self.status_var.set(f"Moved {moved_count} instance(s) to {target_page.display_name} - Click and drag to position, or press Escape to cancel")
         else:
             messagebox.showinfo("Info", "No instances found on current page to move.")
+    
+    def _show_page_context_menu(self, event, page_id: str):
+        """Show context menu for a page tab."""
+        page = self.pages.get(page_id)
+        if not page:
+            return
+        
+        menu = tk.Menu(self.root, tearoff=0, bg=self.theme["menu_bg"], fg=self.theme["menu_fg"],
+                      activebackground=self.theme["menu_hover"], activeforeground=self.theme["selection_fg"])
+        
+        # Count objects on this page
+        page_objects = [obj for obj in self.all_objects 
+                       if any(inst.page_id == page_id for inst in obj.instances)]
+        object_count = len(page_objects)
+        
+        menu.add_command(label=f"Delete Page", 
+                        command=lambda: self._delete_page(page_id),
+                        state="normal" if len(self.pages) > 1 else "disabled")
+        
+        if object_count > 0:
+            menu.add_separator()
+            menu.add_command(label=f"Page has {object_count} object(s)", state="disabled")
+        
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+    
+    def _delete_current_page(self):
+        """Delete the currently selected page."""
+        current_page = self._get_current_page()
+        if current_page:
+            self._delete_page(current_page.tab_id)
+    
+    def _delete_page(self, page_id: str):
+        """Delete a page and all its associated data.
+        
+        Args:
+            page_id: ID of the page to delete
+        """
+        page = self.pages.get(page_id)
+        if not page:
+            return
+        
+        # Don't allow deleting the last page
+        if len(self.pages) <= 1:
+            messagebox.showwarning("Cannot Delete", "Cannot delete the last remaining page.")
+            return
+        
+        # Count objects on this page
+        page_objects = [obj for obj in self.all_objects 
+                       if any(inst.page_id == page_id for inst in obj.instances)]
+        object_count = len(page_objects)
+        
+        # Show confirmation dialog
+        if object_count > 0:
+            msg = f"Delete page '{page.display_name}'?\n\nThis page contains {object_count} object(s). All objects on this page will be removed."
+        else:
+            msg = f"Delete page '{page.display_name}'?"
+        
+        if not messagebox.askyesno("Delete Page", msg):
+            return
+        
+        # Remove all objects that have instances on this page
+        objects_to_remove = []
+        for obj in self.all_objects:
+            # Remove instances on this page
+            obj.instances = [inst for inst in obj.instances if inst.page_id != page_id]
+            # If object has no instances left, mark for removal
+            if not obj.instances:
+                objects_to_remove.append(obj)
+        
+        # Remove objects with no instances
+        for obj in objects_to_remove:
+            self.all_objects.remove(obj)
+            # Also remove from planform_objects if present
+            for planform_id in list(self.planform_objects.keys()):
+                if obj.object_id in self.planform_objects[planform_id]:
+                    self.planform_objects[planform_id].remove(obj.object_id)
+        
+        # Remove page from pages dict
+        del self.pages[page_id]
+        
+        # Remove tab from notebook
+        if hasattr(page, 'frame') and page.frame:
+            try:
+                self.notebook.forget(page.frame)
+            except:
+                pass
+        
+        # If this was the current page, switch to another page
+        if self.current_page_id == page_id:
+            # Find another page to switch to
+            remaining_pages = list(self.pages.keys())
+            if remaining_pages:
+                self._switch_to_page(remaining_pages[0])
+            else:
+                # No pages left (shouldn't happen due to check above, but handle it)
+                self.current_page_id = None
+                self._update_display()
+        
+        # Invalidate caches
+        self.renderer.invalidate_cache()
+        self._invalidate_working_image_cache()
+        
+        # Update workspace modified flag
+        self.workspace_modified = True
+        
+        # Update tree and display
+        self._update_tree()
+        self._update_display()
+        
+        self.status_var.set(f"Deleted page '{page.display_name}'")
     
     def _draw_perimeter(self):
         """Draw a line around the perimeter of the selected object."""
@@ -7268,11 +7492,211 @@ class RePlanApp:
         self.object_move_start = None
         self.object_move_offset = None
     
+    def _transform_selected(self, transform_type: str):
+        """Show transformation dialog and apply transformation to selected objects."""
+        if not (self.selected_object_ids or self.selected_instance_ids or self.selected_element_ids):
+            messagebox.showwarning("No Selection", "Please select objects to transform.")
+            return
+        
+        # Show transformation dialog
+        dialog = TransformDialog(self.root, self.theme, transform_type)
+        self.root.wait_window(dialog)
+        
+        if dialog.result:
+            self._apply_transformation(dialog.result)
+    
+    def _apply_transformation(self, transform_params: dict):
+        """Apply transformation to selected objects/elements.
+        
+        Args:
+            transform_params: Dictionary with transformation parameters:
+                - type: "scale", "rotate", or "mirror"
+                - scale: scale factor (for scale)
+                - angle: rotation angle in degrees (for rotate)
+                - axis: "horizontal" or "vertical" (for mirror)
+                - around_center: whether to transform around center (for scale/rotate)
+        """
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        
+        # Collect elements to transform
+        elements_to_transform = []
+        original_masks = []
+        
+        if self.selected_object_ids:
+            for obj_id in self.selected_object_ids:
+                obj = self._get_object_by_id(obj_id)
+                if not obj:
+                    continue
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            if elem.mask is not None and elem.mask.shape == (h, w):
+                                original_masks.append(elem.mask.copy())
+                                elements_to_transform.append(elem)
+        
+        if self.selected_instance_ids:
+            for inst_id in self.selected_instance_ids:
+                for obj in self.all_objects:
+                    for inst in obj.instances:
+                        if inst.instance_id == inst_id and inst.page_id == page.tab_id:
+                            for elem in inst.elements:
+                                if elem.mask is not None and elem.mask.shape == (h, w):
+                                    original_masks.append(elem.mask.copy())
+                                    elements_to_transform.append(elem)
+        
+        if self.selected_element_ids:
+            for elem_id in self.selected_element_ids:
+                for obj in self.all_objects:
+                    for inst in obj.instances:
+                        if inst.page_id == page.tab_id:
+                            for elem in inst.elements:
+                                if elem.element_id == elem_id:
+                                    if elem.mask is not None and elem.mask.shape == (h, w):
+                                        original_masks.append(elem.mask.copy())
+                                        elements_to_transform.append(elem)
+        
+        if not elements_to_transform:
+            messagebox.showinfo("Info", "No elements to transform.")
+            return
+        
+        # Calculate center point if needed
+        center_x, center_y = 0, 0
+        if transform_params.get("around_center", False):
+            # Calculate center of all selected elements
+            all_points = []
+            for elem in elements_to_transform:
+                if elem.points:
+                    all_points.extend(elem.points)
+                elif elem.mask is not None:
+                    # Use mask centroid
+                    ys, xs = np.where(elem.mask > 0)
+                    if len(xs) > 0:
+                        all_points.append((int(np.mean(xs)), int(np.mean(ys))))
+            
+            if all_points:
+                center_x = int(np.mean([p[0] for p in all_points]))
+                center_y = int(np.mean([p[1] for p in all_points]))
+            else:
+                center_x, center_y = w // 2, h // 2
+        
+        # Build transformation matrix
+        transform_type = transform_params["type"]
+        M = None
+        
+        if transform_type == "scale":
+            scale = transform_params["scale"]
+            if transform_params.get("around_center", False):
+                # Scale around center: translate to origin, scale, translate back
+                M = cv2.getRotationMatrix2D((center_x, center_y), 0, scale)
+                M[0, 2] += center_x * (1 - scale)
+                M[1, 2] += center_y * (1 - scale)
+            else:
+                # Scale around origin
+                M = np.float32([[scale, 0, 0], [0, scale, 0]])
+        
+        elif transform_type == "rotate":
+            angle = transform_params["angle"]
+            if transform_params.get("around_center", False):
+                # Rotate around center
+                M = cv2.getRotationMatrix2D((center_x, center_y), -angle, 1.0)
+            else:
+                # Rotate around origin
+                angle_rad = np.radians(angle)
+                cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+                M = np.float32([[cos_a, sin_a, 0], [-sin_a, cos_a, 0]])
+        
+        elif transform_type == "mirror":
+            axis = transform_params["axis"]
+            if axis == "horizontal":
+                # Mirror horizontally (flip vertically): scale y by -1
+                M = np.float32([[1, 0, 0], [0, -1, h]])
+            else:  # vertical
+                # Mirror vertically (flip horizontally): scale x by -1
+                M = np.float32([[-1, 0, w], [0, 1, 0]])
+        
+        if M is None:
+            return
+        
+        # Apply transformation to pixels in original image
+        new_image = page.original_image.copy()
+        
+        # Combine all original masks
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+        for mask in original_masks:
+            combined_mask = np.maximum(combined_mask, mask)
+        
+        # Transform mask
+        transformed_mask = cv2.warpAffine(combined_mask, M, (w, h),
+                                          flags=cv2.INTER_NEAREST,
+                                          borderMode=cv2.BORDER_CONSTANT,
+                                          borderValue=0)
+        
+        # Extract pixels from old location
+        if len(new_image.shape) == 3:
+            selected_pixels = np.zeros_like(new_image)
+            mask_3d = combined_mask[:, :, np.newaxis]
+            selected_pixels = np.where(mask_3d > 0, new_image, 0)
+        else:
+            selected_pixels = np.where(combined_mask > 0, new_image, 0)
+        
+        # Transform the selected pixels
+        transformed_pixels = cv2.warpAffine(selected_pixels, M, (w, h),
+                                           flags=cv2.INTER_NEAREST,
+                                           borderMode=cv2.BORDER_CONSTANT,
+                                           borderValue=0)
+        
+        # Clear old location and place transformed pixels
+        if len(new_image.shape) == 3:
+            new_image[combined_mask > 0] = [255, 255, 255]
+            mask_3d = transformed_mask[:, :, np.newaxis]
+            new_image = np.where(mask_3d > 0, transformed_pixels, new_image)
+        else:
+            new_image[combined_mask > 0] = 255
+            new_image = np.where(transformed_mask > 0, transformed_pixels, new_image)
+        
+        # Update page image
+        page.original_image = new_image
+        
+        # Transform masks and points for each element
+        for elem in elements_to_transform:
+            if elem.mask is not None and elem.mask.shape == (h, w):
+                # Transform mask
+                elem.mask = cv2.warpAffine(elem.mask, M, (w, h),
+                                          flags=cv2.INTER_NEAREST,
+                                          borderMode=cv2.BORDER_CONSTANT,
+                                          borderValue=0)
+                # Transform points
+                if elem.points:
+                    points_array = np.array(elem.points, dtype=np.float32)
+                    # Add homogeneous coordinate
+                    ones = np.ones((len(points_array), 1))
+                    points_homogeneous = np.hstack([points_array, ones])
+                    # Apply transformation
+                    transformed_points = (M @ points_homogeneous.T).T
+                    elem.points = [(int(p[0]), int(p[1])) for p in transformed_points]
+        
+        # Invalidate caches and update display
+        self.renderer.invalidate_cache()
+        self._invalidate_working_image_cache()
+        self.workspace_modified = True
+        self._update_display()
+        
+        transform_name = transform_params["type"].capitalize()
+        self.status_var.set(f"{transform_name} applied to {len(elements_to_transform)} element(s)")
+    
     def _delete_pixels_from_objects(self, objects_to_delete, instances_to_delete, elements_to_delete):
         """
         Delete pixels from original_image for the given objects/instances/elements.
         Sets pixels in mask areas to white.
+        
+        Returns:
+            Set of page_ids that had pixels deleted
         """
+        pages_modified = set()
         # Group masks by page
         page_masks = {}  # page_id -> list of masks
         
@@ -7330,9 +7754,14 @@ class RePlanApp:
                     # Grayscale image
                     page.original_image[combined_mask > 0] = 255
                 
+                pages_modified.add(page_id)
                 # Invalidate cache for this page since original_image changed
                 self.renderer.invalidate_cache()
+                # Also invalidate working image cache for this page
+                self._invalidate_working_image_cache()
                 print(f"DEBUG: Deleted pixels from page {page_id} (mask size: {np.sum(combined_mask > 0)} pixels)")
+        
+        return pages_modified
     
     def _delete_selected(self):
         # First, collect all objects/elements that will be deleted and their masks
@@ -7379,13 +7808,16 @@ class RePlanApp:
         pixel_action = dialog.result  # "delete_pixels" or "revert_pixels"
         
         # If "delete_pixels", collect all masks and delete pixels from original_image
+        pages_with_deleted_pixels = set()
         if pixel_action == "delete_pixels":
-            self._delete_pixels_from_objects(objects_to_delete, instances_to_delete, elements_to_delete)
+            pages_with_deleted_pixels = self._delete_pixels_from_objects(objects_to_delete, instances_to_delete, elements_to_delete)
         
         # Now proceed with normal deletion logic
         modified_objs = set()
         deleted_objs = set()
         page_ids_to_update = set()  # Track page IDs that need mask updates (use IDs since PageTab is not hashable)
+        # Include pages with deleted pixels in the update set
+        page_ids_to_update.update(pages_with_deleted_pixels)
         
         # Handle element deletions - also remove from page region lists if mark_text/hatch/line
         for elem_id in self.selected_element_ids:

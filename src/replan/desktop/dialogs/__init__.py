@@ -9,6 +9,7 @@ from replan.desktop.dialogs.delete_object import DeleteObjectDialog
 from replan.desktop.dialogs.page_selection import PageSelectionDialog
 from replan.desktop.dialogs.nesting import NestingConfigDialog, SheetSize, MaterialGroup
 from replan.desktop.dialogs.nesting_results import NestingResultsDialog
+from replan.desktop.dialogs.transform import TransformDialog
 
 __all__ = [
     "PDFLoaderDialog",
@@ -20,6 +21,7 @@ __all__ = [
     "PageSelectionDialog",
     "NestingConfigDialog",
     "NestingResultsDialog",
+    "TransformDialog",
     "SheetSize",
     "MaterialGroup",
 ]
