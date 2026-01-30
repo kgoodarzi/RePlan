@@ -160,13 +160,20 @@ class DockablePanel(tk.Frame):
     """
     
     def __init__(self, parent, config: PanelConfig, theme: dict,
-                 on_collapse: Callable[["DockablePanel"], None] = None):
+                 on_collapse: Callable[["DockablePanel"], None] = None,
+                 on_drag_start: Callable[["DockablePanel"], None] = None):
         super().__init__(parent, bg=theme["bg"])
         self.config = config
         self.theme = theme
         self.on_collapse = on_collapse
+        self.on_drag_start = on_drag_start
         self.collapsed = False
         self.width = config.default_width
+        
+        # Drag state
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.is_dragging = False
         
         self._setup_ui()
         
@@ -177,16 +184,35 @@ class DockablePanel(tk.Frame):
         self.header.pack(fill=tk.X)
         self.header.pack_propagate(False)
         
-        # Title
+        # Drag handle (grip icon) - make header draggable
+        drag_handle = tk.Label(
+            self.header,
+            text="⋮⋮",
+            font=("Segoe UI", 10),
+            fg=self.theme["fg_muted"],
+            bg=self.theme["panel_header_bg"],
+            padx=4,
+            cursor="hand2"
+        )
+        drag_handle.pack(side=tk.LEFT, pady=8)
+        drag_handle.bind("<Button-1>", self._on_drag_start)
+        drag_handle.bind("<B1-Motion>", self._on_drag_motion)
+        drag_handle.bind("<ButtonRelease-1>", self._on_drag_end)
+        
+        # Title (also draggable)
         self.title_label = tk.Label(
             self.header,
             text=self.config.title.upper(),
             font=("Segoe UI", 9, "bold"),
             fg=self.theme["panel_header_fg"],
             bg=self.theme["panel_header_bg"],
-            padx=12
+            padx=12,
+            cursor="hand2"
         )
-        self.title_label.pack(side=tk.LEFT, pady=8)
+        self.title_label.pack(side=tk.LEFT, pady=8, fill=tk.X, expand=True)
+        self.title_label.bind("<Button-1>", self._on_drag_start)
+        self.title_label.bind("<B1-Motion>", self._on_drag_motion)
+        self.title_label.bind("<ButtonRelease-1>", self._on_drag_end)
         
         # Collapse button
         collapse_icon = "«" if self.config.side == "left" else "»"
@@ -233,6 +259,54 @@ class DockablePanel(tk.Frame):
         """Set panel width."""
         self.width = max(self.config.min_width, min(width, self.config.max_width))
         self.configure(width=self.width)
+    
+    def _on_drag_start(self, event):
+        """Handle drag start on panel header."""
+        if self.on_drag_start:
+            self.drag_start_x = event.x_root
+            self.drag_start_y = event.y_root
+            self.is_dragging = True
+            self.on_drag_start(self)
+            # Bind to root window for global drag tracking
+            root = self.winfo_toplevel()
+            root.bind("<B1-Motion>", self._on_global_drag_motion)
+            root.bind("<ButtonRelease-1>", self._on_global_drag_end)
+    
+    def _on_drag_motion(self, event):
+        """Handle drag motion (local)."""
+        pass  # Handled by global binding
+    
+    def _on_drag_end(self, event):
+        """Handle drag end (local)."""
+        pass  # Handled by global binding
+    
+    def _on_global_drag_motion(self, event):
+        """Handle global drag motion."""
+        if self.is_dragging and self.on_drag_start:
+            layout = self._get_layout_manager()
+            if layout:
+                layout._on_panel_drag_motion(self, event.x_root, event.y_root)
+    
+    def _on_global_drag_end(self, event):
+        """Handle global drag end."""
+        if self.is_dragging:
+            self.is_dragging = False
+            layout = self._get_layout_manager()
+            if layout:
+                layout._on_panel_drag_end(self, event.x_root, event.y_root)
+            # Unbind from root
+            root = self.winfo_toplevel()
+            root.unbind("<B1-Motion>")
+            root.unbind("<ButtonRelease-1>")
+    
+    def _get_layout_manager(self):
+        """Get the ResizableLayout parent."""
+        parent = self.master
+        while parent:
+            if isinstance(parent, ResizableLayout):
+                return parent
+            parent = parent.master
+        return None
 
 
 class ResizableLayout(tk.Frame):
@@ -279,15 +353,36 @@ class ResizableLayout(tk.Frame):
         # Right panel area
         self.right_panel_frame = tk.Frame(self.paned, bg=self.theme["bg"])
         
-    def add_panel(self, panel_id: str, config: PanelConfig) -> DockablePanel:
-        """Add a dockable panel."""
+        # Store panel content setup callbacks for repositioning
+        self.panel_content_setup_callbacks: Dict[str, Callable[[DockablePanel], None]] = {}
+        
+    def add_panel(self, panel_id: str, config: PanelConfig, 
+                  content_setup_callback: Optional[Callable[[DockablePanel], None]] = None) -> DockablePanel:
+        """Add a dockable panel.
+        
+        Args:
+            panel_id: Unique identifier for the panel
+            config: Panel configuration
+            content_setup_callback: Optional callback to setup panel content (called when panel is repositioned)
+        """
         self.panel_configs[panel_id] = config
+        
+        # Store content setup callback if provided
+        if content_setup_callback:
+            self.panel_content_setup_callbacks[panel_id] = content_setup_callback
+        
+        # Restore dock state from settings if available
+        if hasattr(self.settings, 'panel_dock_states') and panel_id in self.settings.panel_dock_states:
+            saved_side = self.settings.panel_dock_states[panel_id]
+            if saved_side in ["left", "right"]:
+                config.side = saved_side
         
         parent = self.left_panel_frame if config.side == "left" else self.right_panel_frame
         
         panel = DockablePanel(
             parent, config, self.theme,
-            on_collapse=lambda p: self._on_panel_collapse(panel_id, p)
+            on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
+            on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
         )
         
         self.panels[panel_id] = panel
@@ -467,6 +562,278 @@ class ResizableLayout(tk.Frame):
         if panel_id in self.panels:
             self.panels[panel_id].pack_forget()
             self.activity_bar.set_active(None)
+    
+    def _on_panel_drag_start(self, panel_id: str, panel: DockablePanel):
+        """Handle panel drag start."""
+        # Store drag state
+        self.dragging_panel_id = panel_id
+        self.dragging_panel = panel
+        
+        # Create drag preview overlay
+        self._create_drag_preview(panel)
+    
+    def _on_panel_drag_motion(self, panel: DockablePanel, x_root: int, y_root: int):
+        """Handle panel drag motion - update preview and show drop zones."""
+        if hasattr(self, 'drag_preview'):
+            # Update preview position
+            width = self.drag_preview.winfo_width()
+            height = self.drag_preview.winfo_height()
+            self.drag_preview.geometry(f"{width}x{height}+{x_root - width//2}+{y_root - height//2}")
+            
+            # Show drop zones
+            self._show_drop_zones(x_root, y_root)
+    
+    def _create_drag_preview(self, panel: DockablePanel):
+        """Create semi-transparent drag preview."""
+        try:
+            # Get panel geometry
+            x = panel.winfo_rootx()
+            y = panel.winfo_rooty()
+            width = max(200, panel.winfo_width())  # Ensure minimum width
+            height = max(100, panel.winfo_height())  # Ensure minimum height
+            
+            # Create overlay window
+            self.drag_preview = tk.Toplevel(self)
+            self.drag_preview.wm_overrideredirect(True)
+            self.drag_preview.wm_attributes("-alpha", 0.5)
+            self.drag_preview.configure(bg=self.theme["accent"])
+            self.drag_preview.geometry(f"{width}x{height}+{x}+{y}")
+            
+            # Create label with panel title
+            label = tk.Label(
+                self.drag_preview,
+                text=panel.config.title.upper(),
+                font=("Segoe UI", 9, "bold"),
+                fg="white",
+                bg=self.theme["accent"],
+                padx=12,
+                pady=8
+            )
+            label.pack(fill=tk.BOTH, expand=True)
+        except Exception as e:
+            # If preview creation fails, continue without it
+            print(f"Warning: Failed to create drag preview: {e}")
+    
+    
+    def _show_drop_zones(self, x_root: int, y_root: int):
+        """Show visual drop zones for left/right docking."""
+        try:
+            # Get main window geometry
+            root_x = self.winfo_rootx()
+            root_y = self.winfo_rooty()
+            root_width = self.winfo_width()
+            root_height = self.winfo_height()
+            
+            if root_width <= 0 or root_height <= 0:
+                return  # Window not ready yet
+            
+            # Determine which side to highlight
+            center_x = root_x + root_width // 2
+            target_side = "left" if x_root < center_x else "right"
+            
+            # Remove old drop zone indicators
+            if hasattr(self, 'drop_zone_left') and self.drop_zone_left.winfo_exists():
+                try:
+                    self.drop_zone_left.destroy()
+                except:
+                    pass
+            if hasattr(self, 'drop_zone_right') and self.drop_zone_right.winfo_exists():
+                try:
+                    self.drop_zone_right.destroy()
+                except:
+                    pass
+            
+            # Create drop zone indicators
+            drop_zone = tk.Toplevel(self)
+            drop_zone.wm_overrideredirect(True)
+            drop_zone.wm_attributes("-alpha", 0.3)
+            drop_zone.configure(bg=self.theme["accent"])
+            
+            if target_side == "left":
+                drop_zone.geometry(f"200x{root_height}+{root_x}+{root_y}")
+                self.drop_zone_left = drop_zone
+            else:
+                drop_zone.geometry(f"200x{root_height}+{root_x + root_width - 200}+{root_y}")
+                self.drop_zone_right = drop_zone
+        except Exception as e:
+            # Ignore errors in drop zone display
+            pass
+    
+    def _on_panel_drag_end(self, panel: DockablePanel, x_root: int, y_root: int):
+        """Handle panel drag end - determine drop location and reposition."""
+        # Clean up drag preview
+        if hasattr(self, 'drag_preview'):
+            try:
+                if self.drag_preview.winfo_exists():
+                    self.drag_preview.destroy()
+            except:
+                pass
+            delattr(self, 'drag_preview')
+        
+        # Clean up drop zones
+        if hasattr(self, 'drop_zone_left'):
+            try:
+                if self.drop_zone_left.winfo_exists():
+                    self.drop_zone_left.destroy()
+            except:
+                pass
+            delattr(self, 'drop_zone_left')
+        if hasattr(self, 'drop_zone_right'):
+            try:
+                if self.drop_zone_right.winfo_exists():
+                    self.drop_zone_right.destroy()
+            except:
+                pass
+            delattr(self, 'drop_zone_right')
+        
+        # Determine target side
+        try:
+            root_x = self.winfo_rootx()
+            root_width = self.winfo_width()
+            if root_width <= 0:
+                return  # Window not ready
+            
+            center_x = root_x + root_width // 2
+            target_side = "left" if x_root < center_x else "right"
+            
+            # Get panel ID
+            panel_id = None
+            for pid, p in self.panels.items():
+                if p == panel:
+                    panel_id = pid
+                    break
+            
+            if not panel_id:
+                return
+            
+            # If already on target side, do nothing
+            if self.panel_configs[panel_id].side == target_side:
+                return
+            
+            # Reposition panel
+            self._reposition_panel(panel_id, target_side)
+        except Exception as e:
+            # Ignore errors during drag end
+            print(f"Warning: Error during panel drag end: {e}")
+    
+    def _reposition_panel(self, panel_id: str, new_side: str):
+        """Reposition a panel to a different side."""
+        if panel_id not in self.panels:
+            return
+        
+        panel = self.panels[panel_id]
+        config = self.panel_configs[panel_id]
+        
+        # If already on target side, do nothing
+        if config.side == new_side:
+            return
+        
+        # Store panel state before destroying
+        was_collapsed = panel.collapsed
+        content_setup_callback = self.panel_content_setup_callbacks.get(panel_id)
+        
+        # Get new parent
+        new_parent = self.left_panel_frame if new_side == "left" else self.right_panel_frame
+        
+        # Destroy old panel (tkinter widgets can't be reparented)
+        panel.destroy()
+        
+        # Update config side
+        config.side = new_side
+        
+        # Create new panel in new location
+        new_panel = DockablePanel(
+            new_parent, config, self.theme,
+            on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
+            on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
+        )
+        
+        # Restore collapsed state
+        if was_collapsed:
+            new_panel.toggle_collapse()
+        
+        # Update stored panel reference
+        self.panels[panel_id] = new_panel
+        
+        # Re-setup panel content if callback exists
+        if content_setup_callback:
+            content_setup_callback(new_panel)
+        
+        # Pack panel in new location
+        new_panel.pack(fill=tk.BOTH, expand=True)
+        
+        # Rebuild paned window structure
+        self._rebuild_paned_structure()
+        
+        # Save dock state
+        self._save_panel_dock_state(panel_id, new_side)
+    
+    def _rebuild_paned_structure(self):
+        """Rebuild paned window structure after panel repositioning."""
+        # Get current pane list
+        panes = list(self.paned.panes())
+        
+        # Check which frames should be present
+        left_panels = [pid for pid, p in self.panels.items() 
+                      if self.panel_configs[pid].side == "left"]
+        right_panels = [pid for pid, p in self.panels.items() 
+                       if self.panel_configs[pid].side == "right"]
+        
+        # Determine which frames should be in paned window
+        has_left = len(left_panels) > 0
+        has_right = len(right_panels) > 0
+        
+        # Check current state - need to check by widget identity, not just membership
+        has_left_frame = False
+        has_right_frame = False
+        has_center_frame = False
+        for pane_id in panes:
+            try:
+                pane_widget = self.paned.nametowidget(pane_id)
+                if pane_widget == self.left_panel_frame:
+                    has_left_frame = True
+                elif pane_widget == self.right_panel_frame:
+                    has_right_frame = True
+                elif pane_widget == self.center_frame:
+                    has_center_frame = True
+            except:
+                pass
+        
+        # Only rebuild if structure needs to change
+        if (has_left != has_left_frame) or (has_right != has_right_frame) or not has_center_frame:
+            # Remove all panes
+            for pane in panes:
+                try:
+                    self.paned.remove(pane)
+                except:
+                    pass
+            
+            # Re-add panes in correct order
+            if has_left:
+                width = self.settings.sidebar_width
+                self.paned.add(self.left_panel_frame, width=width, minsize=200)
+            
+            # Always add center
+            self.paned.add(self.center_frame, stretch="always", minsize=400)
+            
+            # Add right panels frame if there are right panels
+            if has_right:
+                width = self.settings.tree_width
+                self.paned.add(self.right_panel_frame, width=width, minsize=200)
+            
+            # Force update
+            self.paned.update_idletasks()
+    
+    def _save_panel_dock_state(self, panel_id: str, side: str):
+        """Save panel dock state to settings."""
+        # Store in settings (we'll add panel_dock_states dict if needed)
+        if not hasattr(self.settings, 'panel_dock_states'):
+            self.settings.panel_dock_states = {}
+        self.settings.panel_dock_states[panel_id] = side
+        
+        # Save settings
+        from replan.desktop.config import save_settings
+        save_settings(self.settings)
 
 
 class StatusBar(tk.Frame):

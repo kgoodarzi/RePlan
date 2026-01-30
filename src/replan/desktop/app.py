@@ -67,6 +67,7 @@ from replan.desktop.widgets import (
     CollapsibleFrame, PositionGrid,
     ResizableLayout, StatusBar, PanelConfig, DockablePanel
 )
+from replan.desktop.widgets.responsive_layout import DockablePanel as DockablePanelType
 
 VERSION = "6.0"
 
@@ -844,8 +845,19 @@ class RePlanApp:
             side="right"
         )
         
-        objects_panel = self.layout.add_panel("objects", config)
+        # Create panel with content setup callback for repositioning
+        objects_panel = self.layout.add_panel("objects", config,
+                                             content_setup_callback=self._setup_object_panel_content)
+        self._setup_object_panel_content(objects_panel)
+    
+    def _setup_object_panel_content(self, objects_panel: DockablePanel):
+        """Setup the content of the object panel (called on initial setup and repositioning)."""
+        t = self.theme
         content = objects_panel.content
+        
+        # Clear existing content if any
+        for widget in content.winfo_children():
+            widget.destroy()
         
         # Statistics frame (mark_text, mark_hatch, mark_line counts)
         stats_frame = tk.Frame(content, bg=t["bg"])
@@ -9756,6 +9768,12 @@ class RePlanApp:
                 if hasattr(section, 'collapsed'):
                     tools_sections_state[section_name] = section.collapsed
         
+        # Save panel dock states
+        panel_dock_states = {}
+        if hasattr(self.layout, 'panel_configs'):
+            for panel_id, config in self.layout.panel_configs.items():
+                panel_dock_states[panel_id] = config.side
+        
         return {
             "current_page_id": self.current_page_id,
             "zoom_level": self.zoom_level,
@@ -9767,6 +9785,7 @@ class RePlanApp:
             "center_width": center_width,
             "center_width_ratio": center_width_ratio,
             "tools_sections_state": tools_sections_state,
+            "panel_dock_states": panel_dock_states,
         }
     
     def _restore_view_state(self, view_state: dict):
@@ -10070,6 +10089,20 @@ class RePlanApp:
                                 section.toggle()  # Toggle to desired state
             # Wait for UI to be ready
             self.root.after(200, restore_sections_state)
+        
+        # Restore panel dock states
+        panel_dock_states = view_state.get("panel_dock_states", {})
+        if panel_dock_states and hasattr(self.layout, 'panel_configs'):
+            # Update panel configs with saved dock states before repositioning
+            for panel_id, saved_side in panel_dock_states.items():
+                if panel_id in self.layout.panel_configs and saved_side in ["left", "right"]:
+                    config = self.layout.panel_configs[panel_id]
+                    if config.side != saved_side:
+                        # Reposition panel if side changed (with delay to ensure UI is ready)
+                        def reposition(pid=panel_id, side=saved_side):
+                            if pid in self.layout.panels:
+                                self.layout._reposition_panel(pid, side)
+                        self.root.after(400, reposition)
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")

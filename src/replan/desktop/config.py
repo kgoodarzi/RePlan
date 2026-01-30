@@ -82,6 +82,9 @@ class AppSettings:
     auto_collapse_panels: bool = True
     compact_toolbar: bool = False
     
+    # Panel docking states (panel_id -> side: "left" or "right")
+    panel_dock_states: Dict[str, str] = field(default_factory=dict)
+    
     # Auto-detection
     auto_detect_text: bool = False  # Automatically detect text regions when pages are loaded
     auto_detect_hatch: bool = False  # Automatically detect hatching regions when pages are loaded
