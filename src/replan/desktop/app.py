@@ -414,11 +414,8 @@ class RePlanApp:
         view_menu.add_separator()
         
         # View options (per-page toggles)
-        view_menu.add_command(label="Hide Background", command=self._toggle_hide_background)
-        view_menu.add_command(label="Run OCR", command=self._run_ocr_for_page)
-        view_menu.add_command(label="Hide Hatching", command=self._toggle_hide_hatching)
-        view_menu.add_separator()
-        view_menu.add_command(label="Create View Tab from Planform", command=self._create_view_tab_from_planform)
+        # Note: "Hide Background" and "Hide Hatching" removed - use category visibility toggles instead
+        # "Run OCR" and "Create View Tab from Planform" moved to Tools menu
         view_menu.add_separator()
         view_menu.add_separator()
         
@@ -465,6 +462,9 @@ class RePlanApp:
         parametric_submenu.add_command(label="Generate Rib...", command=self._generate_parametric_rib)
         parametric_submenu.add_command(label="Generate Former...", command=self._generate_parametric_former)
         tools_menu.add_separator()
+        tools_menu.add_command(label="Run OCR", command=self._run_ocr_for_page)
+        tools_menu.add_command(label="Create View Tab from Planform", command=self._create_view_tab_from_planform)
+        tools_menu.add_separator()
         tools_menu.add_command(label="Scan for Labels...", command=self._scan_for_labels)
         tools_menu.add_command(label="Analyze with AWS Textract...", command=self._analyze_with_textract)
         
@@ -495,7 +495,52 @@ class RePlanApp:
         canvas = tk.Canvas(content, bg=t["bg"], highlightthickness=0)
         scroll = ttk.Scrollbar(content, orient="vertical", command=canvas.yview)
         frame = tk.Frame(canvas, bg=t["bg"])
-        frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Store references to first and last sections for scroll bounds
+        first_section_ref = [None]
+        last_section_ref = [None]
+        
+        def update_scroll_region(event=None):
+            """Update scroll region to only include content between first and last sections."""
+            try:
+                if first_section_ref[0] and last_section_ref[0]:
+                    # Get y positions relative to frame
+                    first_y = first_section_ref[0].winfo_y()
+                    last_bottom = last_section_ref[0].winfo_y() + last_section_ref[0].winfo_height()
+                    
+                    # Ensure we don't scroll above first section or below last section
+                    # Set scroll region to exactly match the content area between sections
+                    # No padding to prevent scrolling beyond bounds
+                    canvas.configure(scrollregion=(0, first_y, 
+                                                  canvas.winfo_width(), 
+                                                  last_bottom))
+                    
+                    # Constrain scrolling to prevent going above first section or below last section
+                    # Get current scroll position
+                    try:
+                        top, bottom = canvas.yview()
+                        canvas_height = canvas.winfo_height()
+                        content_height = last_bottom - first_y
+                        
+                        # Calculate max scroll (how much we can scroll down)
+                        if content_height > canvas_height:
+                            max_scroll = (content_height - canvas_height) / content_height
+                            # Ensure we don't scroll above top (top should be >= 0)
+                            if top < 0:
+                                canvas.yview_moveto(0)
+                            # Ensure we don't scroll below bottom
+                            if bottom > max_scroll + 0.001:  # Small tolerance for floating point
+                                canvas.yview_moveto(max(0, max_scroll))
+                    except:
+                        pass  # Ignore errors in scroll constraint
+                else:
+                    # Fallback to full bbox if sections not found
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception as e:
+                # Fallback to full bbox on any error
+                canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        frame.bind("<Configure>", update_scroll_region)
         canvas.create_window((0, 0), window=frame, anchor="nw")
         canvas.configure(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -525,9 +570,10 @@ class RePlanApp:
             _bind_mousewheel_recursive(frame)
         frame.bind("<Configure>", _on_frame_configure)
         
-        # Mode section
+        # Mode section (first section - store reference for scroll bounds)
         mode_section = CollapsibleFrame(frame, "Selection Mode", theme=t)
         mode_section.pack(fill=tk.X, padx=8, pady=4)
+        first_section_ref[0] = mode_section
         
         self.mode_var = tk.StringVar(value="flood")
         for mode, desc in self.MODES.items():
@@ -610,9 +656,10 @@ class RePlanApp:
         tk.Label(view_section.content, text="New objects will be assigned this view",
                 bg=t["bg"], fg=t["fg_subtle"], font=("Segoe UI", 8)).pack(anchor=tk.W, padx=8)
         
-        # Quick actions
+        # Quick actions (last section - store reference for scroll bounds)
         action_section = CollapsibleFrame(frame, "Quick Actions", theme=t)
         action_section.pack(fill=tk.X, padx=8, pady=4)
+        last_section_ref[0] = action_section
         
         ttk.Button(action_section.content, text="Undo", 
                    command=self._undo).pack(fill=tk.X, padx=8, pady=2)
@@ -1467,11 +1514,53 @@ class RePlanApp:
         if unit == "inch":
             pixels_per_unit = ppi
             major_interval = 1.0  # 1 inch
-            subdivisions = [(0.5, 0.6), (0.25, 0.4), (0.125, 0.25), (0.0625, 0.15)]  # (fraction, height_ratio)
+            all_subdivisions = [(0.5, 0.6), (0.25, 0.4), (0.125, 0.25), (0.0625, 0.15)]  # (fraction, height_ratio)
         else:  # cm
             pixels_per_unit = ppi / 2.54
             major_interval = 1.0  # 1 cm
-            subdivisions = [(0.5, 0.5), (0.1, 0.3)]  # 5mm and 1mm marks
+            all_subdivisions = [(0.5, 0.5), (0.1, 0.3)]  # 5mm and 1mm marks
+        
+        # Smart tick spacing based on zoom level
+        min_tick_spacing_pixels = 8  # Minimum pixels between ticks to avoid crowding
+        pixels_per_major = pixels_per_unit * major_interval
+        
+        # Determine which subdivisions to show based on zoom
+        subdivisions = []
+        if pixels_per_major < min_tick_spacing_pixels:
+            # Very zoomed out - show fewer subdivisions or skip some
+            # Only show major ticks if spacing is too tight
+            if pixels_per_major < min_tick_spacing_pixels / 2:
+                # Too crowded even for major ticks - skip some major ticks
+                pass  # Will adjust major tick frequency below
+            else:
+                # Show only largest subdivision
+                if all_subdivisions:
+                    subdivisions = [all_subdivisions[0]]
+        elif pixels_per_major >= min_tick_spacing_pixels * 2:
+            # Moderately zoomed - show some subdivisions
+            if pixels_per_major >= min_tick_spacing_pixels * 4:
+                # Well spaced - show all subdivisions
+                subdivisions = all_subdivisions
+            else:
+                # Show first few subdivisions
+                subdivisions = all_subdivisions[:2] if len(all_subdivisions) >= 2 else all_subdivisions
+        else:
+            # Zoomed in - show all subdivisions
+            for frac, height_ratio in all_subdivisions:
+                sub_spacing = pixels_per_unit * frac
+                if sub_spacing >= min_tick_spacing_pixels:
+                    subdivisions.append((frac, height_ratio))
+        
+        # Adjust major tick and label frequency based on available space
+        major_tick_every_n = 1
+        label_every_n = 1
+        if pixels_per_major < 20:
+            # Very crowded - skip some major ticks
+            major_tick_every_n = max(1, int(20 / pixels_per_major))
+            label_every_n = max(1, int(40 / pixels_per_major))  # Labels need more space
+        elif pixels_per_major < 30:
+            # Crowded - reduce label frequency
+            label_every_n = max(1, int(30 / pixels_per_major))
         
         # Draw background
         ruler.create_rectangle(0, 0, ruler_w, ruler_h, fill=bg, outline="")
@@ -1481,15 +1570,20 @@ class RePlanApp:
         end_unit = int((x_offset + ruler_w) / pixels_per_unit) + 2
         
         for i in range(start_unit, end_unit):
+            # Skip some major ticks if too crowded
+            if i % major_tick_every_n != 0:
+                continue
+                
             x = i * pixels_per_unit - x_offset
             
             if 0 <= x <= ruler_w:
                 # Major tick
                 ruler.create_line(x, ruler_h, x, ruler_h * 0.2, fill=fg, width=1)
-                # Label
-                label = f"{i}" if unit == "inch" else f"{i}"
-                ruler.create_text(x + 3, ruler_h * 0.4, text=label, anchor="w", 
-                                 fill=fg, font=("TkDefaultFont", 7))
+                # Label (only show every N ticks to avoid crowding)
+                if i % label_every_n == 0:
+                    label = f"{i}"
+                    ruler.create_text(x + 3, ruler_h * 0.4, text=label, anchor="w", 
+                                     fill=fg, font=("TkDefaultFont", 7))
             
             # Subdivision ticks
             for frac, height_ratio in subdivisions:
@@ -1523,10 +1617,54 @@ class RePlanApp:
         # Calculate unit intervals
         if unit == "inch":
             pixels_per_unit = ppi
-            subdivisions = [(0.5, 0.6), (0.25, 0.4), (0.125, 0.25), (0.0625, 0.15)]
+            major_interval = 1.0
+            all_subdivisions = [(0.5, 0.6), (0.25, 0.4), (0.125, 0.25), (0.0625, 0.15)]
         else:  # cm
             pixels_per_unit = ppi / 2.54
-            subdivisions = [(0.5, 0.5), (0.1, 0.3)]
+            major_interval = 1.0
+            all_subdivisions = [(0.5, 0.5), (0.1, 0.3)]
+        
+        # Smart tick spacing based on zoom level
+        min_tick_spacing_pixels = 8  # Minimum pixels between ticks to avoid crowding
+        pixels_per_major = pixels_per_unit * major_interval
+        
+        # Determine which subdivisions to show based on zoom
+        subdivisions = []
+        if pixels_per_major < min_tick_spacing_pixels:
+            # Very zoomed out - show fewer subdivisions or skip some
+            # Only show major ticks if spacing is too tight
+            if pixels_per_major < min_tick_spacing_pixels / 2:
+                # Too crowded even for major ticks - skip some major ticks
+                pass  # Will adjust major tick frequency below
+            else:
+                # Show only largest subdivision
+                if all_subdivisions:
+                    subdivisions = [all_subdivisions[0]]
+        elif pixels_per_major >= min_tick_spacing_pixels * 2:
+            # Moderately zoomed - show some subdivisions
+            if pixels_per_major >= min_tick_spacing_pixels * 4:
+                # Well spaced - show all subdivisions
+                subdivisions = all_subdivisions
+            else:
+                # Show first few subdivisions
+                subdivisions = all_subdivisions[:2] if len(all_subdivisions) >= 2 else all_subdivisions
+        else:
+            # Zoomed in - show all subdivisions that fit
+            for frac, height_ratio in all_subdivisions:
+                sub_spacing = pixels_per_unit * frac
+                if sub_spacing >= min_tick_spacing_pixels:
+                    subdivisions.append((frac, height_ratio))
+        
+        # Adjust major tick and label frequency based on available space
+        major_tick_every_n = 1
+        label_every_n = 1
+        if pixels_per_major < 20:
+            # Very crowded - skip some major ticks
+            major_tick_every_n = max(1, int(20 / pixels_per_major))
+            label_every_n = max(1, int(40 / pixels_per_major))  # Labels need more space
+        elif pixels_per_major < 30:
+            # Crowded - reduce label frequency
+            label_every_n = max(1, int(30 / pixels_per_major))
         
         # Draw background
         ruler.create_rectangle(0, 0, ruler_w, ruler_h, fill=bg, outline="")
@@ -1536,15 +1674,20 @@ class RePlanApp:
         end_unit = int((y_offset + ruler_h) / pixels_per_unit) + 2
         
         for i in range(start_unit, end_unit):
+            # Skip some major ticks if too crowded
+            if i % major_tick_every_n != 0:
+                continue
+                
             y = i * pixels_per_unit - y_offset
             
             if 0 <= y <= ruler_h:
                 # Major tick
                 ruler.create_line(ruler_w, y, ruler_w * 0.2, y, fill=fg, width=1)
-                # Label (rotated text approximation)
-                label = f"{i}"
-                ruler.create_text(ruler_w * 0.4, y + 3, text=label, anchor="n",
-                                 fill=fg, font=("TkDefaultFont", 7))
+                # Label (only show every N ticks to avoid crowding)
+                if i % label_every_n == 0:
+                    label = f"{i}"
+                    ruler.create_text(ruler_w * 0.4, y + 3, text=label, anchor="n",
+                                     fill=fg, font=("TkDefaultFont", 7))
             
             # Subdivision ticks
             for frac, height_ratio in subdivisions:
@@ -2428,35 +2571,35 @@ class RePlanApp:
         """Update View menu labels based on current page state."""
         page = self._get_current_page()
         
-        # Menu indices with new structure:
+        # Menu indices with new structure (after removing Hide Background, Hide Hatching, Run OCR, Create View Tab):
         # 0: Toggle Tools Panel
         # 1: Toggle Objects Panel
         # 2: separator
-        # 3: Hide/Show Background
-        # 4: Run OCR (no longer toggles, always runs OCR)
-        # 5: Hide/Show Hatching
-        # 6: separator
-        # 7: Manage Mask Regions...
-        # 8: separator
-        # 9: Hide/Show Ruler
+        # 3: Manage Mask Regions...
+        # 4: separator
+        # 5: Hide/Show Ruler
         
-        # Background toggle (index 3)
-        if page and getattr(page, 'hide_background', False):
-            self.view_menu.entryconfig(3, label="Show Background")
-        else:
-            self.view_menu.entryconfig(3, label="Hide Background")
-        
-        # Hatching toggle (index 5)
-        if page and getattr(page, 'hide_hatching', False):
-            self.view_menu.entryconfig(5, label="Show Hatching")
-        else:
-            self.view_menu.entryconfig(5, label="Hide Hatching")
-        
-        # Ruler toggle (index 10, not 9 - index 9 is a separator)
-        if self.settings.show_ruler:
-            self.view_menu.entryconfig(10, label="Hide Ruler")
-        else:
-            self.view_menu.entryconfig(10, label="Show Ruler")
+        # Ruler toggle - find by searching menu items since indices may have changed
+        try:
+            # Try to find ruler menu item by searching
+            ruler_index = None
+            for i in range(self.view_menu.index("end") + 1):
+                try:
+                    label = self.view_menu.entryconfig(i, "label")[4]
+                    if "Ruler" in str(label):
+                        ruler_index = i
+                        break
+                except:
+                    continue
+            
+            if ruler_index is not None:
+                if self.settings.show_ruler:
+                    self.view_menu.entryconfig(ruler_index, label="Hide Ruler")
+                else:
+                    self.view_menu.entryconfig(ruler_index, label="Show Ruler")
+        except Exception as e:
+            # If menu structure is different, ignore
+            pass
     
     def _show_settings_dialog(self):
         """Show the settings/preferences dialog."""
@@ -4001,6 +4144,8 @@ class RePlanApp:
             # Pixel selection menu
             menu.add_command(label="Move Selection", command=lambda: self._start_move_pixels())
             menu.add_separator()
+            menu.add_command(label="Delete Pixels", command=self._delete_selected_pixels)
+            menu.add_separator()
             menu.add_command(label="Add to Hidden Text", command=lambda: self._add_pixels_to_hidden_category("mark_text"))
             menu.add_command(label="Add to Hidden Hatching", command=lambda: self._add_pixels_to_hidden_category("mark_hatch"))
             menu.add_command(label="Add to Hidden Lines", command=lambda: self._add_pixels_to_hidden_category("mark_line"))
@@ -4065,10 +4210,33 @@ class RePlanApp:
             if self.object_move_start is None:
                 self.object_move_start = (x, y)
                 self.object_move_offset = (0, 0)
+                self.object_move_constraint_axis = None
             else:
                 start_x, start_y = self.object_move_start
                 offset_x = x - start_x
                 offset_y = y - start_y
+                
+                # Check if Shift is held for axis constraint
+                shift_pressed = event.state & 0x1 != 0  # Shift key mask
+                
+                if shift_pressed:
+                    # Determine constraint axis on first movement
+                    if self.object_move_constraint_axis is None:
+                        # Lock to the axis with larger initial movement
+                        if abs(offset_x) > abs(offset_y):
+                            self.object_move_constraint_axis = "horizontal"
+                        else:
+                            self.object_move_constraint_axis = "vertical"
+                    
+                    # Apply constraint
+                    if self.object_move_constraint_axis == "horizontal":
+                        offset_y = 0  # Constrain to horizontal
+                    else:
+                        offset_x = 0  # Constrain to vertical
+                else:
+                    # Reset constraint when Shift is released
+                    self.object_move_constraint_axis = None
+                
                 self.object_move_offset = (offset_x, offset_y)
                 self._update_display()  # Show preview of move
             return
@@ -4122,6 +4290,7 @@ class RePlanApp:
             self.is_moving_objects = False
             self.object_move_start = None
             self.object_move_offset = None
+            self.object_move_constraint_axis = None
             page = self._get_current_page()
             if page and hasattr(page, 'canvas'):
                 page.canvas.config(cursor="crosshair")
@@ -6466,10 +6635,13 @@ class RePlanApp:
         dst_h, dst_w = target_page.original_image.shape[:2]
         needs_resize = (src_h != dst_h) or (src_w != dst_w)
         
-        # Calculate scale factor based on pixels_per_inch ratio to preserve physical size
+        # CRITICAL: Preserve pixel-to-inch ratio - only scale if DPI differs
+        # If DPI is the same, preserve pixel dimensions exactly (1:1 ratio)
         src_ppi = current_page.pixels_per_inch
         dst_ppi = target_page.pixels_per_inch
-        physical_scale = dst_ppi / src_ppi if src_ppi > 0 else 1.0
+        scale_factor = 1.0
+        if abs(src_ppi - dst_ppi) > 0.1:  # DPI differs significantly
+            scale_factor = dst_ppi / src_ppi if src_ppi > 0 else 1.0
         
         # Move instances of selected objects to the target page
         moved_count = 0
@@ -6490,12 +6662,12 @@ class RePlanApp:
                         # Attributes already have physical dimensions, keep them as-is
                         pass
                     
-                    # Resize masks and points using physical scale to maintain physical size
-                    if needs_resize or abs(physical_scale - 1.0) > 0.001:
-                        scale_factor = physical_scale
+                    # Only resize masks and points if DPI differs (scale_factor != 1.0)
+                    # If DPI is the same, preserve pixel dimensions exactly (1:1 ratio)
+                    if abs(scale_factor - 1.0) > 0.001:
                         for elem in inst.elements:
                             if elem.mask is not None and elem.mask.shape == (src_h, src_w):
-                                # Calculate new dimensions based on physical scale
+                                # Calculate new dimensions based on DPI ratio
                                 new_w = int(src_w * scale_factor)
                                 new_h = int(src_h * scale_factor)
                                 # Resize mask to maintain physical size
@@ -6503,6 +6675,7 @@ class RePlanApp:
                             # Also adjust points if they exist
                             if elem.points:
                                 elem.points = [(int(px * scale_factor), int(py * scale_factor)) for px, py in elem.points]
+                    # If scale_factor == 1.0, pixel dimensions are preserved exactly (no scaling)
                     
                     moved_count += 1
         
@@ -6554,15 +6727,17 @@ class RePlanApp:
             messagebox.showinfo("Info", "Instance is already on this page.")
             return
         
-        # Get dimensions and DPI for both pages to handle resizing if needed
+        # Get dimensions and DPI for both pages
         src_h, src_w = current_page.original_image.shape[:2]
         dst_h, dst_w = target_page.original_image.shape[:2]
-        needs_resize = (src_h != dst_h) or (src_w != dst_w)
-        
-        # Calculate scale factor based on pixels_per_inch ratio to preserve physical size
         src_ppi = current_page.pixels_per_inch
         dst_ppi = target_page.pixels_per_inch
-        physical_scale = dst_ppi / src_ppi if src_ppi > 0 else 1.0
+        
+        # CRITICAL: Preserve pixel-to-inch ratio - only scale if DPI differs
+        # If DPI is the same, preserve pixel dimensions exactly (1:1 ratio)
+        scale_factor = 1.0
+        if abs(src_ppi - dst_ppi) > 0.1:  # DPI differs significantly
+            scale_factor = dst_ppi / src_ppi if src_ppi > 0 else 1.0
         
         # Move selected instances to the target page
         moved_count = 0
@@ -6579,9 +6754,9 @@ class RePlanApp:
                             # Attributes already have physical dimensions, keep them as-is
                             pass
                         
-                        # Resize masks and points using physical scale to maintain physical size
-                        if needs_resize or abs(physical_scale - 1.0) > 0.001:
-                            scale_factor = physical_scale
+                        # Only resize masks and points if DPI differs (scale_factor != 1.0)
+                        # If DPI is the same, preserve pixel dimensions exactly (1:1 ratio)
+                        if abs(scale_factor - 1.0) > 0.001:
                             for elem in inst.elements:
                                 if elem.mask is not None and elem.mask.shape == (src_h, src_w):
                                     # Calculate new dimensions based on physical scale
@@ -7104,6 +7279,42 @@ class RePlanApp:
         self.pixel_move_start = None
         self.pixel_move_offset = None
         self._update_display()
+    
+    def _delete_selected_pixels(self):
+        """Delete selected pixels by setting them to white."""
+        if self.selected_pixel_mask is None:
+            return
+        
+        page = self._get_current_page()
+        if not page or page.original_image is None:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        if self.selected_pixel_mask.shape != (h, w):
+            return
+        
+        # Set selected pixels to white
+        mask_indices = self.selected_pixel_mask > 0
+        if len(page.original_image.shape) == 3:
+            # BGR image - use proper channel-by-channel assignment
+            page.original_image[mask_indices, 0] = 255  # B channel
+            page.original_image[mask_indices, 1] = 255  # G channel
+            page.original_image[mask_indices, 2] = 255  # R channel
+        else:
+            # Grayscale image
+            page.original_image[mask_indices] = 255
+        
+        # Clear selection
+        self._clear_pixel_selection()
+        
+        # Invalidate caches
+        self.renderer.invalidate_cache()
+        self._invalidate_working_image_cache()
+        
+        # Update display
+        self._update_display()
+        self.workspace_modified = True
+        self.status_var.set("Deleted selected pixels")
     
     def _start_move_pixels(self):
         """Start moving the selected pixels."""
@@ -7795,15 +8006,25 @@ class RePlanApp:
             
             # Set pixels to white where mask is active
             if np.any(combined_mask > 0):
+                mask_indices = combined_mask > 0
                 if len(page.original_image.shape) == 3:
-                    # BGR image
-                    mask_3channel = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
-                    page.original_image[mask_3channel > 0] = [255, 255, 255]
+                    # BGR image - set all channels to 255 where mask is active
+                    # Use proper broadcasting to ensure all channels are set
+                    page.original_image[mask_indices, 0] = 255  # B channel
+                    page.original_image[mask_indices, 1] = 255  # G channel
+                    page.original_image[mask_indices, 2] = 255  # R channel
                 else:
                     # Grayscale image
-                    page.original_image[combined_mask > 0] = 255
+                    page.original_image[mask_indices] = 255
                 
                 pages_modified.add(page_id)
+                # Force update of combined masks for mark_text/hatch/line categories after pixel deletion
+                # This ensures the masks reflect the deleted pixels
+                if page_id in pages_modified:
+                    # Update combined masks to remove deleted object masks
+                    # This will be done in _delete_selected after objects are removed
+                    pass
+                
                 # Invalidate cache for this page since original_image changed
                 self.renderer.invalidate_cache()
                 # Also invalidate working image cache for this page
@@ -8918,7 +9139,26 @@ class RePlanApp:
         if not view_name:
             return
         
+        # Calculate physical dimensions for cropped page to maintain pixel-to-inch ratio
+        # CRITICAL: Preserve the same pixels_per_inch ratio as source page
+        # Formula: pixels_per_inch = image_width / pdf_width_inches
+        # To maintain same ratio: cropped_width_inches = cropped_w * pdf_width_inches / image_width
+        src_h, src_w = page.original_image.shape[:2]
+        src_ppi = page.pixels_per_inch
+        
+        # Calculate cropped physical dimensions to maintain same pixels_per_inch
+        if src_ppi > 0 and page.pdf_width_inches > 0:
+            # Maintain same pixels_per_inch ratio
+            cropped_width_inches = cropped_w / src_ppi
+            cropped_height_inches = cropped_h / src_ppi
+        else:
+            # Fallback: calculate from DPI
+            cropped_width_inches = cropped_w / page.dpi if page.dpi > 0 else cropped_w / 150.0
+            cropped_height_inches = cropped_h / page.dpi if page.dpi > 0 else cropped_h / 150.0
+        
         # Create new PageTab with the cropped cleaned image
+        # CRITICAL: Preserve pixels_per_inch ratio by using same DPI
+        # This ensures objects maintain their pixel size when moved to this page
         new_page = PageTab(
             tab_id=str(uuid.uuid4())[:8],
             model_name=page.model_name,
@@ -8927,9 +9167,9 @@ class RePlanApp:
             source_path=page.source_path,
             rotation=page.rotation,
             active=True,
-            dpi=page.dpi,
-            pdf_width_inches=page.pdf_width_inches,
-            pdf_height_inches=page.pdf_height_inches
+            dpi=page.dpi,  # Same DPI as source page to preserve pixel-to-inch ratio
+            pdf_width_inches=cropped_width_inches,  # Adjusted physical width
+            pdf_height_inches=cropped_height_inches  # Adjusted physical height
         )
         
         # Copy only the selected planform and objects inside its boundary

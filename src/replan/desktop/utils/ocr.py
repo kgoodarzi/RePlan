@@ -1099,4 +1099,3 @@ def visualize_text_blocks_from_file(image_path: str,
     
     return annotated_image, text_blocks
 
-
