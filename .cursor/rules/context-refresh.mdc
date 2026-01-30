@@ -1,0 +1,13 @@
+---
+description: Refresh context near 80% window usage
+alwaysApply: true
+---
+
+# Context Refresh at 80%
+
+When the conversation reaches ~80% of the context window:
+
+1. **Summarize progress** in `docs/PROGRESS.md` (or the current progress file if different).
+2. **Update the active plan** in `docs/PLAN.md` (or the current plan file if different).
+3. **Sync Beads**: ensure `.beads/issues.jsonl` reflects current status and priorities.
+4. Start a **new context window** and continue from the updated progress/plan and Beads.

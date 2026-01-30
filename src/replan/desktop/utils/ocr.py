@@ -1098,4 +1098,3 @@ def visualize_text_blocks_from_file(image_path: str,
         print(f"Found {len(text_blocks)} text blocks")
     
     return annotated_image, text_blocks
-

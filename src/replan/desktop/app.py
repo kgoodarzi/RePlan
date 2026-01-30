@@ -16,6 +16,42 @@ from PIL import Image, ImageTk, ImageDraw
 import sys
 import os
 
+# Console output filtering
+class _ConsoleOutputFilter:
+    """Filter console output based on configured verbosity."""
+    
+    def __init__(self, stream, mode: str):
+        self.stream = stream
+        self.mode = (mode or "VERBOSE").upper()
+        self._buffer = ""
+    
+    def write(self, data: str):
+        if not data:
+            return 0
+        self._buffer += data
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if self._should_output(line):
+                self.stream.write(line + "\n")
+        return len(data)
+    
+    def flush(self):
+        if self._buffer:
+            if self._should_output(self._buffer):
+                self.stream.write(self._buffer)
+            self._buffer = ""
+        self.stream.flush()
+    
+    def isatty(self):
+        return hasattr(self.stream, "isatty") and self.stream.isatty()
+    
+    def _should_output(self, line: str) -> bool:
+        if self.mode == "NODEBUG":
+            return "error" in line.lower()
+        if self.mode == "INFO":
+            return not line.strip().lower().startswith("debug")
+        return True
+
 # Add findline tools to path
 _desktop_dir = Path(__file__).parent  # replan/desktop
 _replan_dir = _desktop_dir.parent  # replan
@@ -97,6 +133,10 @@ class RePlanApp:
         
         # Load settings
         self.settings = load_settings()
+        if not getattr(self.settings, "debug_output_mode", None):
+            self.settings.debug_output_mode = "NODEBUG"
+            save_settings(self.settings)
+        self._configure_console_output()
         self.theme = get_theme(self.settings.theme)
         
         # Core components
@@ -329,6 +369,15 @@ class RePlanApp:
         
         self.root.configure(bg=t["bg_base"])
     
+    def _configure_console_output(self):
+        """Configure console verbosity based on settings."""
+        mode = getattr(self.settings, "debug_output_mode", "VERBOSE")
+        mode = (mode or "VERBOSE").upper()
+        if mode in {"NODEBUG", "INFO"}:
+            sys.stdout = _ConsoleOutputFilter(sys.__stdout__, mode)
+        else:
+            sys.stdout = sys.__stdout__
+    
     def _init_categories(self):
         """Initialize default categories."""
         self.categories = create_default_categories()
@@ -428,8 +477,8 @@ class RePlanApp:
         # Note: "Hide Background" and "Hide Hatching" removed - use category visibility toggles instead
         # "Run OCR" and "Create View Tab from Planform" moved to Tools menu
         
-        # Manage Mask Regions
-        view_menu.add_command(label="Manage Mask Regions...", command=self._show_mask_regions_dialog)
+        # Manage Mask Regions (placeholder - to be implemented)
+        # view_menu.add_command(label="Manage Mask Regions...", command=self._show_mask_regions_dialog)
         view_menu.add_separator()
         
         # Ruler options
@@ -501,8 +550,21 @@ class RePlanApp:
             side="left"
         )
         
-        tools_panel = self.layout.add_panel("tools", config)
+        tools_panel = self.layout.add_panel(
+            "tools",
+            config,
+            content_setup_callback=self._setup_tools_panel_content
+        )
+        self._setup_tools_panel_content(tools_panel)
+    
+    def _setup_tools_panel_content(self, tools_panel: DockablePanel):
+        """Setup the content of the tools panel (called on initial setup and repositioning)."""
+        t = self.theme
         content = tools_panel.content
+        
+        # Clear existing content if any
+        for widget in content.winfo_children():
+            widget.destroy()
         
         # Scrollable content
         canvas = tk.Canvas(content, bg=t["bg"], highlightthickness=0)
@@ -557,7 +619,7 @@ class RePlanApp:
                 else:
                     # Fallback to full bbox if sections not found
                     canvas.configure(scrollregion=canvas.bbox("all"))
-            except Exception as e:
+            except Exception:
                 # Fallback to full bbox on any error
                 canvas.configure(scrollregion=canvas.bbox("all"))
         
@@ -984,6 +1046,9 @@ class RePlanApp:
         hint_label = tk.Label(content, text="Right-click for actions",
                              bg=t["bg"], fg=t["fg_subtle"], font=("Segoe UI", 8))
         hint_label.pack(pady=(4, 8))
+        
+        # Rebuild tree content after docking reposition
+        self.root.after_idle(lambda: self._update_tree(preserve_state=False))
     
     def _bind_events(self):
         """Bind keyboard shortcuts."""
@@ -9653,8 +9718,19 @@ class RePlanApp:
         sidebar_width_ratio = None
         center_width_ratio = None
         
+        # Save panel dock states
+        panel_dock_states = {}
+        if hasattr(self.layout, 'panel_configs'):
+            for panel_id, config in self.layout.panel_configs.items():
+                panel_dock_states[panel_id] = config.side
+        
+        should_measure_horizontal = (
+            panel_dock_states.get("tools", "left") == "left" and
+            panel_dock_states.get("objects", "right") == "right"
+        )
+        
         # Get actual widths from sash positions (most reliable method)
-        if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
+        if should_measure_horizontal and hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
             try:
                 # Force update to get accurate dimensions
                 self.layout.paned.update_idletasks()
@@ -9750,12 +9826,14 @@ class RePlanApp:
                             except:
                                 pass
                     
-                    # Calculate object viewer width from remaining space
-                    if sidebar_width and center_width:
-                        object_viewer_width = paned_width - sidebar_width - center_width
+                    # Save object viewer width from actual right panel frame
+                    try:
+                        object_viewer_width = right_panel_frame.winfo_width()
                         if object_viewer_width > 50:
                             self.settings.tree_width = object_viewer_width
-                            print(f"DEBUG: Calculated object viewer width: {object_viewer_width}px (from remaining space)")
+                            print(f"DEBUG: Saving object viewer width: {object_viewer_width}px")
+                    except:
+                        pass
                             
             except Exception as e:
                 print(f"DEBUG: Error getting panel widths: {e}")
@@ -9767,12 +9845,6 @@ class RePlanApp:
             for section_name, section in self.tools_sections.items():
                 if hasattr(section, 'collapsed'):
                     tools_sections_state[section_name] = section.collapsed
-        
-        # Save panel dock states
-        panel_dock_states = {}
-        if hasattr(self.layout, 'panel_configs'):
-            for panel_id, config in self.layout.panel_configs.items():
-                panel_dock_states[panel_id] = config.side
         
         return {
             "current_page_id": self.current_page_id,
@@ -9811,6 +9883,14 @@ class RePlanApp:
         if hasattr(self, 'current_view_var'):
             self.current_view_var.set(view_state.get("current_view", ""))
         
+        panel_dock_states = view_state.get("panel_dock_states", {})
+        should_restore_horizontal = True
+        if panel_dock_states:
+            tools_side = panel_dock_states.get("tools", "left")
+            objects_side = panel_dock_states.get("objects", "right")
+            if tools_side != "left" or objects_side != "right":
+                should_restore_horizontal = False
+        
         # Restore panel widths - save sidebar and center, then object viewer takes remaining space
         sidebar_width = view_state.get("sidebar_width")
         sidebar_width_ratio = view_state.get("sidebar_width_ratio")
@@ -9826,7 +9906,7 @@ class RePlanApp:
                 sidebar_width = self.settings.sidebar_width
                 center_width = None  # Will be calculated
         
-        if sidebar_width or sidebar_width_ratio or center_width or center_width_ratio:
+        if should_restore_horizontal and (sidebar_width or sidebar_width_ratio or center_width or center_width_ratio):
             if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
                 # Track restoration attempts
                 if not hasattr(self, '_panel_width_restore_attempts'):
@@ -10091,11 +10171,10 @@ class RePlanApp:
             self.root.after(200, restore_sections_state)
         
         # Restore panel dock states
-        panel_dock_states = view_state.get("panel_dock_states", {})
         if panel_dock_states and hasattr(self.layout, 'panel_configs'):
             # Update panel configs with saved dock states before repositioning
             for panel_id, saved_side in panel_dock_states.items():
-                if panel_id in self.layout.panel_configs and saved_side in ["left", "right"]:
+                if panel_id in self.layout.panel_configs and saved_side in ["left", "right", "top", "bottom", "floating"]:
                     config = self.layout.panel_configs[panel_id]
                     if config.side != saved_side:
                         # Reposition panel if side changed (with delay to ensure UI is ready)

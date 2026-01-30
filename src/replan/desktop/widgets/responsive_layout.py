@@ -349,6 +349,31 @@ class DockablePanel(tk.Frame):
         return None
 
 
+class FloatingPanelWindow(tk.Toplevel):
+    """Floating window container for a docked panel."""
+    
+    def __init__(self, layout, panel_id: str, title: str, theme: dict, on_close: Callable[[], None]):
+        super().__init__(layout)
+        self.layout = layout
+        self.panel_id = panel_id
+        self.theme = theme
+        self.on_close = on_close
+        
+        self.title(title)
+        self.configure(bg=self.theme["bg"])
+        
+        self.content = tk.Frame(self, bg=self.theme["bg"])
+        self.content.pack(fill=tk.BOTH, expand=True)
+        
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+    
+    def _on_close(self):
+        if self.on_close:
+            self.on_close()
+        else:
+            self.destroy()
+
+
 class ResizableLayout(tk.Frame):
     """
     Main layout manager with resizable panels and activity bar.
@@ -361,6 +386,7 @@ class ResizableLayout(tk.Frame):
         self.panels: Dict[str, DockablePanel] = {}
         self.panel_configs: Dict[str, PanelConfig] = {}
         self.floating_windows: Dict[str, FloatingPanelWindow] = {}
+        self.side_notebooks: Dict[str, ttk.Notebook] = {}
         self.current_layout_mode = "full"
         
         self._setup_structure()
@@ -490,34 +516,68 @@ class ResizableLayout(tk.Frame):
         
         # Add left panels to horizontal paned window
         if left_panels:
-            self.paned.add(self.left_panel_frame, width=self.settings.sidebar_width, minsize=200)
-            for panel in left_panels:
-                panel.pack(fill=tk.BOTH, expand=True)
+            left_panel_ids = [pid for pid, p in self.panels.items()
+                              if self.panel_configs[pid].side == "left"]
+            self.paned.add(
+                self.left_panel_frame,
+                width=self._get_side_width("left", left_panel_ids),
+                minsize=200
+            )
+            self._rebuild_side_container("left")
         
         # Setup vertical paned window (center_paned) for top/center/bottom
         # Add top panels if any
         if top_panels:
-            self.center_paned.add(self.top_panel_frame, height=200, minsize=150)
-            for panel in top_panels:
-                panel.pack(fill=tk.BOTH, expand=True)
+            # Use first panel's config for height, or default
+            top_height = 200
+            top_minsize = 150
+            if top_panels:
+                first_top_panel_id = None
+                for pid, p in self.panels.items():
+                    if p == top_panels[0]:
+                        first_top_panel_id = pid
+                        break
+                if first_top_panel_id and first_top_panel_id in self.panel_configs:
+                    config = self.panel_configs[first_top_panel_id]
+                    top_height = config.default_height
+                    top_minsize = config.min_height
+            self.center_paned.add(self.top_panel_frame, height=top_height, minsize=top_minsize)
+            self._rebuild_side_container("top")
         
         # Always add center frame to vertical paned window
         self.center_paned.add(self.center_frame, stretch="always", minsize=200)
         
         # Add bottom panels if any
         if bottom_panels:
-            self.center_paned.add(self.bottom_panel_frame, height=200, minsize=150)
-            for panel in bottom_panels:
-                panel.pack(fill=tk.BOTH, expand=True)
+            # Use first panel's config for height, or default
+            bottom_height = 200
+            bottom_minsize = 150
+            if bottom_panels:
+                first_bottom_panel_id = None
+                for pid, p in self.panels.items():
+                    if p == bottom_panels[0]:
+                        first_bottom_panel_id = pid
+                        break
+                if first_bottom_panel_id and first_bottom_panel_id in self.panel_configs:
+                    config = self.panel_configs[first_bottom_panel_id]
+                    bottom_height = config.default_height
+                    bottom_minsize = config.min_height
+            self.center_paned.add(self.bottom_panel_frame, height=bottom_height, minsize=bottom_minsize)
+            self._rebuild_side_container("bottom")
         
         # Add center vertical paned window to horizontal paned window
         self.paned.add(self.center_paned, stretch="always", minsize=400)
         
         # Add right panels to horizontal paned window
         if right_panels:
-            self.paned.add(self.right_panel_frame, width=self.settings.tree_width, minsize=200)
-            for panel in right_panels:
-                panel.pack(fill=tk.BOTH, expand=True)
+            right_panel_ids = [pid for pid, p in self.panels.items()
+                               if self.panel_configs[pid].side == "right"]
+            self.paned.add(
+                self.right_panel_frame,
+                width=self._get_side_width("right", right_panel_ids),
+                minsize=200
+            )
+            self._rebuild_side_container("right")
             
         # Bind to paned window sash movement to track panel width changes
         def on_sash_moved(event=None):
@@ -531,21 +591,21 @@ class ResizableLayout(tk.Frame):
                 if len(panes) < 2:
                     return
                 
-                # Save sidebar width (sash 0) if left panel exists
+                # Save left panel width (sash 0) if left panel exists
                 if left_panels:
                     try:
                         sash0_pos = self.paned.sashpos(0)
                         if sash0_pos > 50:
-                            self.settings.sidebar_width = sash0_pos
+                            self._save_side_width("left", left_panels, sash0_pos)
                     except (tk.TclError, AttributeError, IndexError):
                         try:
                             sidebar_width = self.left_panel_frame.winfo_width()
                             if sidebar_width > 50:
-                                self.settings.sidebar_width = sidebar_width
+                                self._save_side_width("left", left_panels, sidebar_width)
                         except:
                             pass
                 
-                # Save object viewer width if right panel exists
+                # Save right panel width if right panel exists
                 if right_panels:
                     try:
                         # Find the right panel sash position
@@ -561,17 +621,13 @@ class ResizableLayout(tk.Frame):
                             object_viewer_width = paned_width - sash_pos
                             
                             if object_viewer_width > 50:
-                                self.settings.tree_width = object_viewer_width
-                                from replan.desktop.config import save_settings
-                                save_settings(self.settings)
+                                self._save_side_width("right", right_panels, object_viewer_width)
                     except (tk.TclError, AttributeError, IndexError):
                         # Fallback to winfo_width
                         try:
                             object_viewer_width = self.right_panel_frame.winfo_width()
                             if object_viewer_width > 50:
-                                self.settings.tree_width = object_viewer_width
-                                from replan.desktop.config import save_settings
-                                save_settings(self.settings)
+                                self._save_side_width("right", right_panels, object_viewer_width)
                         except:
                             pass
             except Exception as e:
@@ -617,18 +673,48 @@ class ResizableLayout(tk.Frame):
         panel = self.panels[panel_id]
         config = self.panel_configs[panel_id]
         
+        if config.side == "floating":
+            floating_window = self.floating_windows.get(panel_id)
+            if not floating_window or not floating_window.winfo_exists():
+                return
+            if floating_window.winfo_viewable():
+                floating_window.withdraw()
+                self.activity_bar.set_active(None)
+            else:
+                floating_window.deiconify()
+                floating_window.lift()
+                floating_window.focus()
+                self.activity_bar.set_active(panel_id)
+            return
+        
         # Toggle visibility
-        if panel.winfo_viewable():
-            panel.pack_forget()
-            self.activity_bar.set_active(None)
+        if isinstance(panel.master, ttk.Notebook):
+            notebook = panel.master
+            tab_ids = notebook.tabs()
+            panel_id_str = str(panel)
+            if panel_id_str in tab_ids:
+                notebook.hide(panel)
+                self.activity_bar.set_active(None)
+            else:
+                notebook.add(panel, text=config.title)
+                notebook.select(panel)
+                self.activity_bar.set_active(panel_id)
         else:
-            panel.pack(fill=tk.BOTH, expand=True)
-            self.activity_bar.set_active(panel_id)
+            if panel.winfo_viewable():
+                panel.pack_forget()
+                self.activity_bar.set_active(None)
+            else:
+                panel.pack(fill=tk.BOTH, expand=True)
+                self.activity_bar.set_active(panel_id)
             
     def _on_panel_collapse(self, panel_id: str, panel: DockablePanel):
         """Handle panel collapse."""
         # Update settings
-        if self.panel_configs[panel_id].side == "left":
+        if panel_id == "tools":
+            self.settings.sidebar_collapsed = panel.collapsed
+        elif panel_id == "objects":
+            self.settings.tree_collapsed = panel.collapsed
+        elif self.panel_configs[panel_id].side == "left":
             self.settings.sidebar_collapsed = panel.collapsed
         else:
             self.settings.tree_collapsed = panel.collapsed
@@ -703,7 +789,17 @@ class ResizableLayout(tk.Frame):
     def hide_panel(self, panel_id: str):
         """Hide a specific panel."""
         if panel_id in self.panels:
-            self.panels[panel_id].pack_forget()
+            config = self.panel_configs.get(panel_id)
+            if config and config.side == "floating":
+                floating_window = self.floating_windows.get(panel_id)
+                if floating_window and floating_window.winfo_exists():
+                    floating_window.withdraw()
+            else:
+                panel = self.panels[panel_id]
+                if isinstance(panel.master, ttk.Notebook):
+                    panel.master.hide(panel)
+                else:
+                    panel.pack_forget()
             self.activity_bar.set_active(None)
     
     def _on_panel_drag_start(self, panel_id: str, panel: DockablePanel):
@@ -827,10 +923,14 @@ class ResizableLayout(tk.Frame):
                 drop_zone.geometry(f"200x{root_height}+{root_x + root_width - 200}+{root_y}")
                 self.drop_zone_right = drop_zone
             elif target_side == "top":
-                drop_zone.geometry(f"{root_width}x200+{root_x}+{root_y}")
+                # Show drop zone at top - use reasonable height based on window size
+                drop_height = min(250, max(150, root_height // 4))
+                drop_zone.geometry(f"{root_width}x{drop_height}+{root_x}+{root_y}")
                 self.drop_zone_top = drop_zone
             else:  # bottom
-                drop_zone.geometry(f"{root_width}x200+{root_x}+{root_y + root_height - 200}")
+                # Show drop zone at bottom - use reasonable height based on window size
+                drop_height = min(250, max(150, root_height // 4))
+                drop_zone.geometry(f"{root_width}x{drop_height}+{root_x}+{root_y + root_height - drop_height}")
                 self.drop_zone_bottom = drop_zone
         except Exception as e:
             # Ignore errors in drop zone display
@@ -963,18 +1063,12 @@ class ResizableLayout(tk.Frame):
         config.side = new_side
         
         # Create new panel in new location
-        # If panel was floating, reuse it (it's already been removed from floating window)
-        if config.side == "floating" and panel_id in self.panels:
-            # Panel already exists, just reparent it
-            panel.master = new_parent
-            new_panel = panel
-        else:
-            # Create new panel
-            new_panel = DockablePanel(
-                new_parent, config, self.theme,
-                on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
-                on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
-            )
+        # Create new panel
+        new_panel = DockablePanel(
+            new_parent, config, self.theme,
+            on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
+            on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
+        )
         
         # Restore collapsed state
         if was_collapsed:
@@ -992,6 +1086,7 @@ class ResizableLayout(tk.Frame):
         
         # Rebuild paned window structure
         self._rebuild_paned_structure()
+        self._rebuild_side_container(new_side)
         
         # Save dock state
         self._save_panel_dock_state(panel_id, new_side)
@@ -1043,7 +1138,7 @@ class ResizableLayout(tk.Frame):
             
             # Re-add panes in correct order
             if has_left:
-                width = self.settings.sidebar_width
+                width = self._get_side_width("left", left_panels)
                 self.paned.add(self.left_panel_frame, width=width, minsize=200)
             
             # Always add center vertical paned window
@@ -1051,7 +1146,7 @@ class ResizableLayout(tk.Frame):
             
             # Add right panels frame if there are right panels
             if has_right:
-                width = self.settings.tree_width
+                width = self._get_side_width("right", right_panels)
                 self.paned.add(self.right_panel_frame, width=width, minsize=200)
         
         # Now rebuild vertical paned window (center_paned)
@@ -1083,20 +1178,143 @@ class ResizableLayout(tk.Frame):
             
             # Re-add panes in correct order (top to bottom)
             if has_top:
-                height = 200  # Default height for top panels
-                self.center_paned.add(self.top_panel_frame, height=height, minsize=150)
+                # Use first top panel's config for height
+                top_height = 200
+                top_minsize = 150
+                if top_panels:
+                    first_top_panel_id = top_panels[0]
+                    if first_top_panel_id in self.panel_configs:
+                        config = self.panel_configs[first_top_panel_id]
+                        top_height = config.default_height
+                        top_minsize = config.min_height
+                self.center_paned.add(self.top_panel_frame, height=top_height, minsize=top_minsize)
             
             # Always add center frame
             self.center_paned.add(self.center_frame, stretch="always", minsize=200)
             
             # Add bottom panels frame if there are bottom panels
             if has_bottom:
-                height = 200  # Default height for bottom panels
-                self.center_paned.add(self.bottom_panel_frame, height=height, minsize=150)
+                # Use first bottom panel's config for height
+                bottom_height = 200
+                bottom_minsize = 150
+                if bottom_panels:
+                    first_bottom_panel_id = bottom_panels[0]
+                    if first_bottom_panel_id in self.panel_configs:
+                        config = self.panel_configs[first_bottom_panel_id]
+                        bottom_height = config.default_height
+                        bottom_minsize = config.min_height
+                self.center_paned.add(self.bottom_panel_frame, height=bottom_height, minsize=bottom_minsize)
         
         # Force update
         self.paned.update_idletasks()
         self.center_paned.update_idletasks()
+        
+        # Rebuild side containers for any side that changed
+        self._rebuild_side_container("left")
+        self._rebuild_side_container("right")
+        self._rebuild_side_container("top")
+        self._rebuild_side_container("bottom")
+
+    def _get_side_width(self, side: str, panel_ids: List[str]) -> int:
+        """Get the preferred width for a side based on panel ids."""
+        # Prefer explicit settings for known panels
+        if "tools" in panel_ids:
+            return self.settings.sidebar_width
+        if "objects" in panel_ids:
+            return self.settings.tree_width
+        # Fall back to first panel's default width
+        if panel_ids:
+            config = self.panel_configs.get(panel_ids[0])
+            if config:
+                return config.default_width
+        # Default fallback
+        return self.settings.sidebar_width if side == "left" else self.settings.tree_width
+
+    def _save_side_width(self, side: str, panels: List[DockablePanel], width: int):
+        """Save width to the correct setting based on which panel is docked."""
+        panel_ids = []
+        for pid, panel in self.panels.items():
+            if panel in panels:
+                panel_ids.append(pid)
+        if "tools" in panel_ids:
+            self.settings.sidebar_width = width
+        elif "objects" in panel_ids:
+            self.settings.tree_width = width
+        else:
+            if side == "left":
+                self.settings.sidebar_width = width
+            else:
+                self.settings.tree_width = width
+        from replan.desktop.config import save_settings
+        save_settings(self.settings)
+
+    def _rebuild_side_container(self, side: str):
+        """Rebuild side container with tabs if multiple panels share a side."""
+        if side == "left":
+            frame = self.left_panel_frame
+        elif side == "right":
+            frame = self.right_panel_frame
+        elif side == "top":
+            frame = self.top_panel_frame
+        else:
+            frame = self.bottom_panel_frame
+        
+        panel_ids = [pid for pid, cfg in self.panel_configs.items() if cfg.side == side]
+        if not panel_ids:
+            return
+        
+        # Clear existing notebook if present
+        existing_notebook = self.side_notebooks.get(side)
+        if existing_notebook and existing_notebook.winfo_exists():
+            existing_notebook.destroy()
+            self.side_notebooks.pop(side, None)
+        
+        # Remove any existing child widgets from frame
+        for child in frame.winfo_children():
+            try:
+                child.destroy()
+            except:
+                pass
+        
+        use_tabs = len(panel_ids) > 1
+        if use_tabs:
+            notebook = ttk.Notebook(frame)
+            notebook.pack(fill=tk.BOTH, expand=True)
+            self.side_notebooks[side] = notebook
+        else:
+            notebook = None
+        
+        for panel_id in panel_ids:
+            config = self.panel_configs[panel_id]
+            old_panel = self.panels.get(panel_id)
+            was_collapsed = old_panel.collapsed if old_panel else False
+            content_setup_callback = self.panel_content_setup_callbacks.get(panel_id)
+            
+            if old_panel:
+                try:
+                    old_panel.destroy()
+                except:
+                    pass
+            
+            parent = notebook if notebook else frame
+            new_panel = DockablePanel(
+                parent, config, self.theme,
+                on_collapse=lambda p, pid=panel_id: self._on_panel_collapse(pid, p),
+                on_drag_start=lambda p, pid=panel_id: self._on_panel_drag_start(pid, p)
+            )
+            
+            if was_collapsed:
+                new_panel.toggle_collapse()
+            
+            self.panels[panel_id] = new_panel
+            
+            if content_setup_callback:
+                content_setup_callback(new_panel)
+            
+            if notebook:
+                notebook.add(new_panel, text=config.title)
+            else:
+                new_panel.pack(fill=tk.BOTH, expand=True)
     
     def _save_panel_dock_state(self, panel_id: str, side: str):
         """Save panel dock state to settings."""
@@ -1117,6 +1335,129 @@ class ResizableLayout(tk.Frame):
         # Save settings
         from replan.desktop.config import save_settings
         save_settings(self.settings)
+
+    def _float_panel(self, panel_id: str, panel: DockablePanel):
+        """Float a panel into a separate window."""
+        if panel_id in self.floating_windows:
+            return
+        
+        config = self.panel_configs[panel_id]
+        content_setup_callback = self.panel_content_setup_callbacks.get(panel_id)
+        was_collapsed = panel.collapsed
+        
+        # Track last docked side for redocking
+        if config.side != "floating":
+            config.last_docked_side = config.side
+        
+        # Destroy docked panel
+        try:
+            panel.destroy()
+        except:
+            pass
+        
+        # Update config
+        config.side = "floating"
+        
+        # Create floating window
+        floating_window = FloatingPanelWindow(
+            self, panel_id, config.title, self.theme,
+            on_close=lambda: self._redock_floating_panel(panel_id)
+        )
+        
+        # Restore saved geometry if available
+        if hasattr(self.settings, "floating_panel_geometries"):
+            geometry = self.settings.floating_panel_geometries.get(panel_id)
+            if geometry:
+                try:
+                    floating_window.geometry(geometry)
+                except:
+                    pass
+        
+        # Create new panel inside floating window
+        new_panel = DockablePanel(
+            floating_window.content, config, self.theme,
+            on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
+            on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
+        )
+        
+        if was_collapsed:
+            new_panel.toggle_collapse()
+        
+        self.panels[panel_id] = new_panel
+        self.floating_windows[panel_id] = floating_window
+        
+        if content_setup_callback:
+            content_setup_callback(new_panel)
+        
+        new_panel.pack(fill=tk.BOTH, expand=True)
+        
+        # Rebuild paned structure to remove empty frames
+        self._rebuild_paned_structure()
+        
+        # Save dock state
+        self._save_panel_dock_state(panel_id, "floating")
+    
+    def _redock_floating_panel(self, panel_id: str):
+        """Redock a floating panel when its window is closed."""
+        if panel_id not in self.panels:
+            return
+        
+        config = self.panel_configs[panel_id]
+        floating_window = self.floating_windows.get(panel_id)
+        panel = self.panels.get(panel_id)
+        
+        was_collapsed = panel.collapsed if panel else False
+        
+        # Determine side to redock to
+        last_side = getattr(config, "last_docked_side", "left")
+        if last_side not in ["left", "right", "top", "bottom"]:
+            last_side = "left"
+        
+        # Destroy floating window and panel
+        if panel:
+            try:
+                panel.destroy()
+            except:
+                pass
+        if floating_window and floating_window.winfo_exists():
+            try:
+                floating_window.destroy()
+            except:
+                pass
+        self.floating_windows.pop(panel_id, None)
+        
+        # Update config side
+        config.side = last_side
+        
+        # Determine parent frame based on side
+        if last_side == "left":
+            new_parent = self.left_panel_frame
+        elif last_side == "right":
+            new_parent = self.right_panel_frame
+        elif last_side == "top":
+            new_parent = self.top_panel_frame
+        else:
+            new_parent = self.bottom_panel_frame
+        
+        # Create panel back in layout
+        new_panel = DockablePanel(
+            new_parent, config, self.theme,
+            on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
+            on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
+        )
+        
+        if was_collapsed:
+            new_panel.toggle_collapse()
+        
+        self.panels[panel_id] = new_panel
+        
+        content_setup_callback = self.panel_content_setup_callbacks.get(panel_id)
+        if content_setup_callback:
+            content_setup_callback(new_panel)
+        
+        new_panel.pack(fill=tk.BOTH, expand=True)
+        self._rebuild_paned_structure()
+        self._save_panel_dock_state(panel_id, last_side)
 
 
 class StatusBar(tk.Frame):

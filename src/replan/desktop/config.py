@@ -82,6 +82,12 @@ class AppSettings:
     auto_collapse_panels: bool = True
     compact_toolbar: bool = False
     
+    # Console output verbosity: "NODEBUG", "INFO", "VERBOSE"
+    debug_output_mode: str = "NODEBUG"
+
+    # Console output verbosity
+    debug_output_mode: str = "NODEBUG"  # "VERBOSE", "INFO", "NODEBUG"
+    
     # Panel docking states (panel_id -> side: "left" or "right")
     panel_dock_states: Dict[str, str] = field(default_factory=dict)  # Maps panel_id to side ("left", "right", "top", "bottom", "floating")
     floating_panel_geometries: Dict[str, str] = field(default_factory=dict)  # Maps panel_id to geometry string for floating windows
