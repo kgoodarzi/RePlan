@@ -21,7 +21,8 @@ class ImageExporter:
                     path: str,
                     page: PageTab,
                     categories: Dict[str, DynamicCategory],
-                    include_labels: bool = True) -> bool:
+                    include_labels: bool = True,
+                    include_legend: bool = False) -> bool:
         """
         Export a segmented page as an image.
         
@@ -30,6 +31,7 @@ class ImageExporter:
             page: Page to export
             categories: Category definitions
             include_labels: Whether to include labels
+            include_legend: Whether to include color legend panel
             
         Returns:
             True if successful
@@ -46,12 +48,95 @@ class ImageExporter:
             if rendered.shape[2] == 4:
                 rendered = cv2.cvtColor(rendered, cv2.COLOR_BGRA2BGR)
             
+            # Add legend if requested
+            if include_legend:
+                rendered = self._add_legend(rendered, categories)
+            
             cv2.imwrite(path, rendered)
             return True
             
         except Exception as e:
             print(f"Error exporting image: {e}")
             return False
+    
+    def _add_legend(self, image: np.ndarray, categories: Dict[str, DynamicCategory]) -> np.ndarray:
+        """
+        Add a color legend panel to the image.
+        
+        Args:
+            image: Image to add legend to
+            categories: Category definitions
+            
+        Returns:
+            Image with legend added
+        """
+        h, w = image.shape[:2]
+        
+        # Legend dimensions
+        legend_width = 200
+        legend_padding = 10
+        item_height = 25
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        
+        # Calculate legend height
+        num_categories = len([c for c in categories.values() if c.name not in ["mark_text", "mark_hatch", "mark_line"]])
+        legend_height = (num_categories * item_height) + (legend_padding * 2)
+        
+        # Create new image with space for legend
+        new_w = w + legend_width + legend_padding
+        new_h = max(h, legend_height)
+        new_image = np.ones((new_h, new_w, 3), dtype=np.uint8) * 255
+        
+        # Copy original image
+        new_image[:h, :w] = image
+        
+        # Draw legend background
+        legend_x = w + legend_padding
+        legend_y = legend_padding
+        cv2.rectangle(new_image, 
+                    (legend_x, legend_y),
+                    (legend_x + legend_width, legend_y + legend_height),
+                    (240, 240, 240), -1)
+        cv2.rectangle(new_image,
+                    (legend_x, legend_y),
+                    (legend_x + legend_width, legend_y + legend_height),
+                    (200, 200, 200), 2)
+        
+        # Draw legend title
+        title = "Category Legend"
+        title_size = cv2.getTextSize(title, font, 0.6, 2)[0]
+        title_x = legend_x + (legend_width - title_size[0]) // 2
+        cv2.putText(new_image, title, (title_x, legend_y + 20),
+                   font, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
+        
+        # Draw category items
+        y_offset = legend_y + 35
+        for cat_name, category in sorted(categories.items()):
+            if cat_name in ["mark_text", "mark_hatch", "mark_line"]:
+                continue  # Skip mark categories
+            
+            # Color swatch
+            color_bgr = category.color_rgb[::-1] if len(category.color_rgb) == 3 else (128, 128, 128)
+            cv2.rectangle(new_image,
+                         (legend_x + 10, y_offset - 15),
+                         (legend_x + 30, y_offset - 5),
+                         color_bgr, -1)
+            cv2.rectangle(new_image,
+                         (legend_x + 10, y_offset - 15),
+                         (legend_x + 30, y_offset - 5),
+                         (0, 0, 0), 1)
+            
+            # Category name
+            display_name = category.name or cat_name
+            cv2.putText(new_image, display_name,
+                       (legend_x + 35, y_offset - 5),
+                       font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
+            
+            y_offset += item_height
+        
+        return new_image
     
     def export_masks(self,
                      output_dir: str,

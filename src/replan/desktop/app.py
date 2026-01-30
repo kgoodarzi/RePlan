@@ -49,11 +49,16 @@ from replan.desktop.models import (
 )
 from replan.desktop.models.attributes import ObjectAttributes
 from replan.desktop.core import SegmentationEngine, Renderer
+from replan.desktop.core.parametric import ParametricPartGenerator, RibParameters, FormerParameters
 from replan.desktop.io import WorkspaceManager, PDFReader
+from replan.desktop.io.export import ImageExporter, DataExporter
+from replan.desktop.io.vector_export import DXFExporter, SVGExporter
+from replan.desktop.io.cam_export import GCodeExporter
+from replan.desktop.io.parts_library import PartsLibrary
 from replan.desktop.dialogs import (
     PDFLoaderDialog, LabelScanDialog, AttributeDialog, SettingsDialog, 
     DeleteObjectDialog, PageSelectionDialog, NestingConfigDialog, NestingResultsDialog,
-    TransformDialog
+    TransformDialog, PrintPreviewDialog
 )
 from replan.desktop.dialogs.category_selection import CategorySelectionDialog
 from replan.desktop.core.nesting import NestingEngine, check_rectpack_available
@@ -104,6 +109,8 @@ class RePlanApp:
         self.all_objects: List[SegmentedObject] = []  # Global object list across all pages
         # Store which objects are within each planform (planform_id -> list of object_ids)
         self.planform_objects: Dict[str, List[str]] = {}
+        # Parts library
+        self.parts_library = PartsLibrary()
         
         # Selection state
         self.selected_object_ids: Set[str] = set()
@@ -371,7 +378,14 @@ class RePlanApp:
         file_menu.add_command(label="Save Workspace As...", command=self._save_workspace_as)
         file_menu.add_separator()
         file_menu.add_command(label="Export Image...", command=self._export_image)
+        file_menu.add_command(label="Export Image with Legend...", command=self._export_image_with_legend)
         file_menu.add_command(label="Export Data...", command=self._export_data)
+        file_menu.add_separator()
+        export_submenu = tk.Menu(file_menu, tearoff=0, bg=t["menu_bg"], fg=t["menu_fg"])
+        file_menu.add_cascade(label="Export", menu=export_submenu)
+        export_submenu.add_command(label="DXF...", command=self._export_dxf)
+        export_submenu.add_command(label="SVG...", command=self._export_svg)
+        export_submenu.add_command(label="G-code (CAM)...", command=self._export_gcode)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
         
@@ -440,8 +454,25 @@ class RePlanApp:
         menubar.add_cascade(label="Tools", menu=tools_menu)
         tools_menu.add_command(label="Nest Parts on Sheets...", command=self._show_nesting_dialog)
         tools_menu.add_separator()
+        # Parts library submenu
+        library_submenu = tk.Menu(tools_menu, tearoff=0, bg=t["menu_bg"], fg=t["menu_fg"])
+        tools_menu.add_cascade(label="Parts Library", menu=library_submenu)
+        library_submenu.add_command(label="Save Selected to Library...", command=self._save_to_library)
+        library_submenu.add_command(label="Insert from Library...", command=self._insert_from_library)
+        # Parametric parts submenu
+        parametric_submenu = tk.Menu(tools_menu, tearoff=0, bg=t["menu_bg"], fg=t["menu_fg"])
+        tools_menu.add_cascade(label="Parametric Parts", menu=parametric_submenu)
+        parametric_submenu.add_command(label="Generate Rib...", command=self._generate_parametric_rib)
+        parametric_submenu.add_command(label="Generate Former...", command=self._generate_parametric_former)
+        tools_menu.add_separator()
         tools_menu.add_command(label="Scan for Labels...", command=self._scan_for_labels)
         tools_menu.add_command(label="Analyze with AWS Textract...", command=self._analyze_with_textract)
+        
+        # Print menu
+        print_menu = tk.Menu(menubar, tearoff=0, bg=t["menu_bg"], fg=t["menu_fg"],
+                            activebackground=t["menu_hover"], activeforeground=t["selection_fg"])
+        menubar.add_cascade(label="Print", menu=print_menu)
+        print_menu.add_command(label="Print Preview...", command=self._show_print_preview)
     
     def _setup_tools_panel(self):
         """Setup the tools panel (left sidebar)."""
@@ -8555,9 +8586,212 @@ class RePlanApp:
         path = filedialog.asksaveasfilename(title="Export Data", defaultextension=".json",
                                             filetypes=[("JSON", "*.json")])
         if path:
-            from replan.desktop.io.export import DataExporter
             DataExporter().export_page(path, page)
             self.status_var.set(f"Exported: {Path(path).name}")
+    
+    def _export_image_with_legend(self):
+        """Export image with legend panel."""
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        path = filedialog.asksaveasfilename(title="Export Image with Legend", defaultextension=".png",
+                                            initialfile=page.segmented_filename,
+                                            filetypes=[("PNG", "*.png")])
+        if path:
+            ImageExporter(self.renderer).export_page(path, page, self.categories, 
+                                                     include_labels=True, include_legend=True)
+            self.status_var.set(f"Exported with legend: {Path(path).name}")
+    
+    def _export_dxf(self):
+        """Export page as DXF."""
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        path = filedialog.asksaveasfilename(title="Export DXF", defaultextension=".dxf",
+                                            filetypes=[("DXF", "*.dxf")])
+        if path:
+            exporter = DXFExporter()
+            if exporter.export_page(path, page, self.categories):
+                self.status_var.set(f"Exported DXF: {Path(path).name}")
+            else:
+                messagebox.showerror("Export Error", "Failed to export DXF.", parent=self.root)
+    
+    def _export_svg(self):
+        """Export page as SVG."""
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        path = filedialog.asksaveasfilename(title="Export SVG", defaultextension=".svg",
+                                            filetypes=[("SVG", "*.svg")])
+        if path:
+            from replan.desktop.io.vector_export import SVGExporter
+            exporter = SVGExporter()
+            if exporter.export_page(path, page, self.categories):
+                self.status_var.set(f"Exported SVG: {Path(path).name}")
+            else:
+                messagebox.showerror("Export Error", "Failed to export SVG.", parent=self.root)
+    
+    def _export_gcode(self):
+        """Export page as G-code for CAM/laser cutting."""
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        path = filedialog.asksaveasfilename(title="Export G-code", defaultextension=".gcode",
+                                            filetypes=[("G-code", "*.gcode"), ("NC", "*.nc"), ("All", "*.*")])
+        if path:
+            # Get scale factor from page DPI
+            scale_mm_per_pixel = 25.4 / page.pixels_per_inch if page.pixels_per_inch > 0 else 0.1
+            exporter = GCodeExporter()
+            if exporter.export_page(path, page, self.categories, scale_mm_per_pixel):
+                self.status_var.set(f"Exported G-code: {Path(path).name}")
+            else:
+                messagebox.showerror("Export Error", "Failed to export G-code.", parent=self.root)
+    
+    def _show_print_preview(self):
+        """Show print preview dialog."""
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "No page is currently open.", parent=self.root)
+            return
+        
+        dialog = PrintPreviewDialog(self.root, self.theme, page, self.categories)
+        self.root.wait_window(dialog)
+        
+        if dialog.result:
+            # User clicked Print - export the preview image
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+                parent=self.root
+            )
+            if path and dialog.preview_image is not None:
+                cv2.imwrite(path, dialog.preview_image)
+                self.status_var.set(f"Printed to: {Path(path).name}")
+    
+    def _save_to_library(self):
+        """Save selected object to parts library."""
+        if not self.selected_object_ids:
+            messagebox.showwarning("No Selection", "Please select an object to save to library.", parent=self.root)
+            return
+        
+        obj_id = next(iter(self.selected_object_ids))
+        obj = self._get_object_by_id(obj_id)
+        if not obj:
+            return
+        
+        from tkinter import simpledialog
+        name = simpledialog.askstring("Save to Library", "Enter part name:", 
+                                      initialvalue=obj.name, parent=self.root)
+        if name:
+            library = PartsLibrary()
+            part_id = library.add_part(obj, name=name)
+            self.status_var.set(f"Saved '{name}' to parts library")
+            messagebox.showinfo("Library", f"Part '{name}' saved to library.", parent=self.root)
+    
+    def _insert_from_library(self):
+        """Insert a part from the library."""
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "No page is currently open.", parent=self.root)
+            return
+        
+        # Create simple library browser dialog
+        library = PartsLibrary()
+        parts = library.list_parts()
+        
+        if not parts:
+            messagebox.showinfo("Library", "Parts library is empty.", parent=self.root)
+            return
+        
+        # Simple selection dialog
+        from tkinter import simpledialog
+        part_list = "\n".join([f"{i+1}. {p.name} ({p.category})" for i, p in enumerate(parts)])
+        choice = simpledialog.askstring("Insert from Library", 
+                                       f"Select part (1-{len(parts)}):\n\n{part_list}",
+                                       parent=self.root)
+        
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(parts):
+                part = parts[idx]
+                h, w = page.original_image.shape[:2]
+                obj = library.instantiate_part(part.part_id, (h, w))
+                if obj:
+                    # Set page ID for instance
+                    obj.instances[0].page_id = page.tab_id
+                    self.all_objects.append(obj)
+                    self.workspace_modified = True
+                    self.renderer.invalidate_cache()
+                    self._update_tree()
+                    self._update_display()
+                    self.status_var.set(f"Inserted '{part.name}' from library")
+        except (ValueError, IndexError):
+            pass
+    
+    def _generate_parametric_rib(self):
+        """Generate a parametric rib."""
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "No page is currently open.", parent=self.root)
+            return
+        
+        from tkinter import simpledialog
+        chord_str = simpledialog.askstring("Generate Rib", "Chord (inches):", parent=self.root)
+        thickness_str = simpledialog.askstring("Generate Rib", "Thickness (inches):", parent=self.root)
+        
+        try:
+            chord = float(chord_str)
+            thickness = float(thickness_str)
+            
+            generator = ParametricPartGenerator(dpi=page.pixels_per_inch)
+            params = RibParameters(chord=chord, thickness=thickness)
+            obj = generator.generate_rib(params)
+            
+            # Add to page
+            obj.instances[0].page_id = page.tab_id
+            self.all_objects.append(obj)
+            self.workspace_modified = True
+            self.renderer.invalidate_cache()
+            self._update_tree()
+            self._update_display()
+            self.status_var.set(f"Generated rib: {chord}\" x {thickness}\"")
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "Invalid parameters.", parent=self.root)
+    
+    def _generate_parametric_former(self):
+        """Generate a parametric former."""
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "No page is currently open.", parent=self.root)
+            return
+        
+        from tkinter import simpledialog
+        diameter_str = simpledialog.askstring("Generate Former", "Diameter (inches):", parent=self.root)
+        thickness_str = simpledialog.askstring("Generate Former", "Wall thickness (inches):", parent=self.root)
+        
+        try:
+            diameter = float(diameter_str)
+            thickness = float(thickness_str)
+            
+            generator = ParametricPartGenerator(dpi=page.pixels_per_inch)
+            params = FormerParameters(diameter=diameter, thickness=thickness)
+            obj = generator.generate_former(params)
+            
+            # Add to page
+            obj.instances[0].page_id = page.tab_id
+            self.all_objects.append(obj)
+            self.workspace_modified = True
+            self.renderer.invalidate_cache()
+            self._update_tree()
+            self._update_display()
+            self.status_var.set(f"Generated former: {diameter}\" diameter")
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "Invalid parameters.", parent=self.root)
     
     def _create_view_tab_from_planform(self):
         """Create a new working tab from the selected planform object with only objects inside its boundary."""
