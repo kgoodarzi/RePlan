@@ -50,6 +50,7 @@ from replan.desktop.models import (
 from replan.desktop.models.attributes import ObjectAttributes
 from replan.desktop.core import SegmentationEngine, Renderer
 from replan.desktop.core.parametric import ParametricPartGenerator, RibParameters, FormerParameters
+from replan.desktop.core.undo import UndoManager, Command
 from replan.desktop.io import WorkspaceManager, PDFReader
 from replan.desktop.io.export import ImageExporter, DataExporter
 from replan.desktop.io.vector_export import DXFExporter, SVGExporter
@@ -85,6 +86,7 @@ class RePlanApp:
         "freeform": "Freeform brush",
         "line": "Line segments",
         "rect": "Rectangular selection",
+        "paint": "Paint brush",
     }
     
     def __init__(self, startup_workspace: str = None, startup_pdf: str = None):
@@ -136,6 +138,11 @@ class RePlanApp:
         self.group_mode_active = False
         self.group_mode_elements: List[SegmentElement] = []
         
+        # Paint mode state
+        self.paint_brush_size = 5  # Brush size in pixels
+        self.paint_color = (0, 0, 0)  # Black by default (BGR)
+        self.paint_last_pos: Optional[Tuple[int, int]] = None
+        
         # Rectangle selection state
         self.rect_start: Optional[tuple] = None  # (x, y) where rectangle started
         self.rect_current: Optional[tuple] = None  # (x, y) current mouse position
@@ -154,6 +161,9 @@ class RePlanApp:
         # Workspace state
         self.workspace_file: Optional[str] = None
         self.workspace_modified = False
+        
+        # Undo/Redo system
+        self.undo_manager = UndoManager(max_depth=50)
         
         # Cache for working image (to avoid recomputing on every call)
         # Format: (page_id, visibility_state, image, applied_masks)
@@ -865,6 +875,8 @@ class RePlanApp:
         self.root.bind("<Control-o>", lambda e: self._load_workspace())
         self.root.bind("<Control-s>", lambda e: self._save_workspace())
         self.root.bind("<Control-z>", lambda e: self._undo())
+        self.root.bind("<Control-y>", lambda e: self._redo())
+        self.root.bind("<Control-Shift-Z>", lambda e: self._redo())  # Alternative redo shortcut
         self.root.bind("<Escape>", lambda e: self._cancel())
         self.root.bind("<Return>", lambda e: self._on_enter())
         
@@ -904,6 +916,7 @@ class RePlanApp:
         self.root.bind("<b>", lambda e: self._set_mode("freeform") if not self._is_text_input_focused() else None)
         self.root.bind("<l>", lambda e: self._set_mode("line") if not self._is_text_input_focused() else None)
         self.root.bind("<r>", lambda e: self._set_mode("rect") if not self._is_text_input_focused() else None)
+        self.root.bind("<t>", lambda e: self._set_mode("paint") if not self._is_text_input_focused() else None)  # 't' for paint/brush tool
         # Selection shortcuts
         self.root.bind("<Control-a>", lambda e: self._select_all() if not self._is_text_input_focused() else None)
         self.root.bind("<Control-d>", lambda e: self._deselect_all() if not self._is_text_input_focused() else None)
@@ -1714,34 +1727,30 @@ class RePlanApp:
             self._draw_rulers(page)
     
     def _undo(self):
-        page = self._get_current_page()
-        if not page or not self.all_objects:
-            return
-        
-        # Find last object with instance on current page
-        last = None
-        for obj in reversed(self.all_objects):
-            for inst in obj.instances:
-                if inst.page_id == page.tab_id:
-                    last = obj
-                    break
-            if last:
-                break
-        
-        if not last:
-            return
-            
-        if last.instances and last.instances[-1].elements:
-            last.instances[-1].elements.pop()
-            if not last.instances[-1].elements:
-                last.instances.pop()
-            if not last.instances:
-                self.all_objects.remove(last)
-                self._remove_tree_item(last.object_id)
-            else:
-                self._update_tree_item(last)
-        self.workspace_modified = True
-        self.renderer.invalidate_cache()
+        """Undo the last operation."""
+        if self.undo_manager.undo():
+            self.workspace_modified = True
+            self.renderer.invalidate_cache()
+            self._invalidate_working_image_cache()
+            self._update_tree()
+            self._update_display()
+            desc = self.undo_manager.get_redo_description()
+            self.status_var.set(f"Undone: {desc}" if desc else "Undo")
+        else:
+            self.status_var.set("Nothing to undo")
+    
+    def _redo(self):
+        """Redo the last undone operation."""
+        if self.undo_manager.redo():
+            self.workspace_modified = True
+            self.renderer.invalidate_cache()
+            self._invalidate_working_image_cache()
+            self._update_tree()
+            self._update_display()
+            desc = self.undo_manager.get_undo_description()
+            self.status_var.set(f"Redone: {desc}" if desc else "Redo")
+        else:
+            self.status_var.set("Nothing to redo")
         self._update_display()
     
     
@@ -4067,6 +4076,11 @@ class RePlanApp:
         elif self.current_mode == "freeform":
             self.is_drawing = True
             self.current_points = [(x, y)]
+        elif self.current_mode == "paint":
+            # Start painting
+            self.is_drawing = True
+            self.paint_last_pos = (x, y)
+            self._paint_pixel(x, y)
     
     def _on_double_click(self, event):
         if self.current_mode == "polyline" and len(self.current_points) >= 3:
@@ -4244,6 +4258,13 @@ class RePlanApp:
         if self.current_mode == "rect" and self.is_drawing and self.rect_start:
             self.rect_current = (x, y)
             self._redraw_rectangle()
+        elif self.current_mode == "paint" and self.is_drawing:
+            # Paint brush - draw line from last position to current
+            if self.paint_last_pos:
+                self._paint_line(self.paint_last_pos[0], self.paint_last_pos[1], x, y)
+            else:
+                self._paint_pixel(x, y)
+            self.paint_last_pos = (x, y)
         elif self.current_mode == "freeform" and self.is_drawing:
             self.current_points.append((x, y))
             self._redraw_points()
@@ -4300,6 +4321,14 @@ class RePlanApp:
             x, y = self._canvas_to_image(event.x, event.y)
             self.rect_current = (x, y)
             self._finish_rectangle()
+        elif self.current_mode == "paint" and self.is_drawing:
+            # Finish painting stroke
+            self.is_drawing = False
+            self.paint_last_pos = None
+            self.workspace_modified = True
+            self.renderer.invalidate_cache()
+            self._invalidate_working_image_cache()
+            self._update_display()
         elif self.current_mode == "freeform" and self.is_drawing:
             self.is_drawing = False
             if len(self.current_points) >= 2:
@@ -4349,6 +4378,50 @@ class RePlanApp:
             self.selected_element_ids.clear()
             self.object_tree.selection_remove(*self.object_tree.selection())
         
+        self._update_display()
+    
+    def _paint_pixel(self, x: int, y: int):
+        """Paint a single pixel (or brush circle) at the given position."""
+        page = self._get_current_page()
+        if not page or page.original_image is None:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        if not (0 <= x < w and 0 <= y < h):
+            return
+        
+        # Draw circle with brush size
+        brush_size = self.paint_brush_size
+        if len(page.original_image.shape) == 3:
+            cv2.circle(page.original_image, (x, y), brush_size, self.paint_color, -1)
+        else:
+            cv2.circle(page.original_image, (x, y), brush_size, self.paint_color[0] if isinstance(self.paint_color, tuple) else self.paint_color, -1)
+        
+        self.renderer.invalidate_cache()
+        self._invalidate_working_image_cache()
+        self._update_display()
+    
+    def _paint_line(self, x1: int, y1: int, x2: int, y2: int):
+        """Paint a line between two points."""
+        page = self._get_current_page()
+        if not page or page.original_image is None:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        # Clamp coordinates
+        x1 = max(0, min(w-1, x1))
+        y1 = max(0, min(h-1, y1))
+        x2 = max(0, min(w-1, x2))
+        y2 = max(0, min(h-1, y2))
+        
+        brush_size = self.paint_brush_size
+        if len(page.original_image.shape) == 3:
+            cv2.line(page.original_image, (x1, y1), (x2, y2), self.paint_color, brush_size * 2)
+        else:
+            cv2.line(page.original_image, (x1, y1), (x2, y2), self.paint_color[0] if isinstance(self.paint_color, tuple) else self.paint_color, brush_size * 2)
+        
+        self.renderer.invalidate_cache()
+        self._invalidate_working_image_cache()
         self._update_display()
     
     def _flood_fill(self, x: int, y: int):
@@ -9728,8 +9801,14 @@ class RePlanApp:
                         if self._panel_width_restore_attempts < max_attempts:
                             self.root.after(200, restore_panel_widths)
                 
-                # Start restoration process
-                self.root.after(100, restore_panel_widths)
+                # Start restoration process - use longer delay to ensure layout is ready
+                # Also try multiple times with increasing delays
+                def try_restore(attempt=0):
+                    if attempt < 5:
+                        self.root.after(300 + attempt * 200, lambda: try_restore(attempt + 1))
+                    restore_panel_widths()
+                
+                self.root.after(500, lambda: try_restore(0))
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")
