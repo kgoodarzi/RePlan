@@ -6,7 +6,7 @@ Modern VS Code/Cursor-inspired UI with responsive layout.
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox, simpledialog, colorchooser
 from pathlib import Path
 from typing import Dict, Set, List, Optional
 import uuid
@@ -426,7 +426,9 @@ class RePlanApp:
         # View options (per-page toggles)
         # Note: "Hide Background" and "Hide Hatching" removed - use category visibility toggles instead
         # "Run OCR" and "Create View Tab from Planform" moved to Tools menu
-        view_menu.add_separator()
+        
+        # Manage Mask Regions
+        view_menu.add_command(label="Manage Mask Regions...", command=self._show_mask_regions_dialog)
         view_menu.add_separator()
         
         # Ruler options
@@ -514,6 +516,9 @@ class RePlanApp:
             """Update scroll region to only include content between first and last sections."""
             try:
                 if first_section_ref[0] and last_section_ref[0]:
+                    # Force update to get accurate positions
+                    frame.update_idletasks()
+                    
                     # Get y positions relative to frame
                     first_y = first_section_ref[0].winfo_y()
                     last_bottom = last_section_ref[0].winfo_y() + last_section_ref[0].winfo_height()
@@ -525,9 +530,9 @@ class RePlanApp:
                                                   canvas.winfo_width(), 
                                                   last_bottom))
                     
-                    # Constrain scrolling to prevent going above first section or below last section
-                    # Get current scroll position
+                    # Constrain scrolling more strictly - prevent any scrolling beyond bounds
                     try:
+                        # Get current scroll position
                         top, bottom = canvas.yview()
                         canvas_height = canvas.winfo_height()
                         content_height = last_bottom - first_y
@@ -535,12 +540,17 @@ class RePlanApp:
                         # Calculate max scroll (how much we can scroll down)
                         if content_height > canvas_height:
                             max_scroll = (content_height - canvas_height) / content_height
-                            # Ensure we don't scroll above top (top should be >= 0)
+                            # Clamp top to [0, max_scroll]
                             if top < 0:
                                 canvas.yview_moveto(0)
-                            # Ensure we don't scroll below bottom
-                            if bottom > max_scroll + 0.001:  # Small tolerance for floating point
+                            elif top > max_scroll:
+                                canvas.yview_moveto(max_scroll)
+                            # Clamp bottom to [top, 1.0] but also respect max_scroll
+                            if bottom > max_scroll + 0.001:
                                 canvas.yview_moveto(max(0, max_scroll))
+                        else:
+                            # Content fits in canvas - no scrolling needed
+                            canvas.yview_moveto(0)
                     except:
                         pass  # Ignore errors in scroll constraint
                 else:
@@ -549,6 +559,40 @@ class RePlanApp:
             except Exception as e:
                 # Fallback to full bbox on any error
                 canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        # Also constrain scrolling on mousewheel events
+        def constrained_mousewheel(event):
+            """Mousewheel handler with scroll bounds enforcement."""
+            if event.state & 0x4 == 0:  # Check if Control key is not pressed
+                # Get current scroll position before scrolling
+                try:
+                    top, bottom = canvas.yview()
+                    canvas_height = canvas.winfo_height()
+                    
+                    if first_section_ref[0] and last_section_ref[0]:
+                        first_y = first_section_ref[0].winfo_y()
+                        last_bottom = last_section_ref[0].winfo_y() + last_section_ref[0].winfo_height()
+                        content_height = last_bottom - first_y
+                        
+                        if content_height > canvas_height:
+                            max_scroll = (content_height - canvas_height) / content_height
+                            # Perform scroll
+                            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                            # Check bounds after scroll
+                            top_after, bottom_after = canvas.yview()
+                            if top_after < 0:
+                                canvas.yview_moveto(0)
+                            elif top_after > max_scroll:
+                                canvas.yview_moveto(max_scroll)
+                        else:
+                            # Content fits - no scrolling
+                            canvas.yview_moveto(0)
+                    else:
+                        # Fallback to normal scrolling
+                        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                except:
+                    # Fallback to normal scrolling
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
         frame.bind("<Configure>", update_scroll_region)
         canvas.create_window((0, 0), window=frame, anchor="nw")
@@ -560,7 +604,8 @@ class RePlanApp:
         def _on_mousewheel(event):
             # Only scroll if Ctrl is not pressed (Ctrl+mouse wheel is for zoom)
             if event.state & 0x4 == 0:  # Check if Control key is not pressed
-                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                # Use constrained scrolling
+                constrained_mousewheel(event)
         
         def _bind_mousewheel_recursive(widget):
             """Recursively bind mousewheel to widget and all its children."""
@@ -580,10 +625,14 @@ class RePlanApp:
             _bind_mousewheel_recursive(frame)
         frame.bind("<Configure>", _on_frame_configure)
         
+        # Store references to collapsible sections for state persistence
+        self.tools_sections = {}
+        
         # Mode section (first section - store reference for scroll bounds)
         mode_section = CollapsibleFrame(frame, "Selection Mode", theme=t)
         mode_section.pack(fill=tk.X, padx=8, pady=4)
         first_section_ref[0] = mode_section
+        self.tools_sections["Selection Mode"] = mode_section
         
         self.mode_var = tk.StringVar(value="flood")
         for mode, desc in self.MODES.items():
@@ -595,6 +644,7 @@ class RePlanApp:
         # Categories section
         cat_section = CollapsibleFrame(frame, "Categories", theme=t)
         cat_section.pack(fill=tk.X, padx=8, pady=4)
+        self.tools_sections["Categories"] = cat_section
         
         ttk.Button(cat_section.content, text="🔍 Scan Labels", 
                    command=self._scan_labels).pack(fill=tk.X, padx=8, pady=4)
@@ -607,6 +657,7 @@ class RePlanApp:
         # Label position
         label_section = CollapsibleFrame(frame, "Label Position", theme=t)
         label_section.pack(fill=tk.X, padx=8, pady=4)
+        self.tools_sections["Label Position"] = label_section
         
         self.position_grid = PositionGrid(label_section.content, self._set_label_position, "center")
         self.position_grid.pack(padx=8, pady=4)
@@ -619,6 +670,7 @@ class RePlanApp:
         # Group mode section
         group_section = CollapsibleFrame(frame, "Group Selection", theme=t)
         group_section.pack(fill=tk.X, padx=8, pady=4)
+        self.tools_sections["Group Selection"] = group_section
         
         self.group_mode_var = tk.BooleanVar()
         ttk.Checkbutton(group_section.content, text="Group Mode", 
@@ -633,6 +685,7 @@ class RePlanApp:
         # Pixel selection mode section
         pixel_section = CollapsibleFrame(frame, "Pixel Selection", theme=t)
         pixel_section.pack(fill=tk.X, padx=8, pady=4)
+        self.tools_sections["Pixel Selection"] = pixel_section
         
         self.pixel_selection_mode_var = tk.BooleanVar()
         ttk.Checkbutton(pixel_section.content, text="Pixel Selection Mode", 
@@ -649,6 +702,7 @@ class RePlanApp:
         # Current view section
         view_section = CollapsibleFrame(frame, "Current View", theme=t)
         view_section.pack(fill=tk.X, padx=8, pady=4)
+        self.tools_sections["Current View"] = view_section
         
         view_frame = tk.Frame(view_section.content, bg=t["bg"])
         view_frame.pack(fill=tk.X, padx=8, pady=4)
@@ -666,10 +720,60 @@ class RePlanApp:
         tk.Label(view_section.content, text="New objects will be assigned this view",
                 bg=t["bg"], fg=t["fg_subtle"], font=("Segoe UI", 8)).pack(anchor=tk.W, padx=8)
         
+        # Paint settings section (shown only when paint mode is active)
+        paint_section = CollapsibleFrame(frame, "Paint Settings", theme=t)
+        paint_section.pack(fill=tk.X, padx=8, pady=4)
+        self.tools_sections["Paint Settings"] = paint_section
+        self.paint_settings_frame = paint_section.content
+        
+        # Brush size
+        brush_size_frame = tk.Frame(self.paint_settings_frame, bg=t["bg"])
+        brush_size_frame.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(brush_size_frame, text="Brush Size:", bg=t["bg"], fg=t["fg"], font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.paint_brush_size_var = tk.IntVar(value=self.paint_brush_size)
+        brush_size_spin = ttk.Spinbox(brush_size_frame, from_=1, to=100, textvariable=self.paint_brush_size_var,
+                                      width=8, command=self._update_paint_brush_size)
+        brush_size_spin.pack(side=tk.RIGHT)
+        brush_size_spin.bind("<KeyRelease>", lambda e: self._update_paint_brush_size())
+        
+        # Color selection
+        color_frame = tk.Frame(self.paint_settings_frame, bg=t["bg"])
+        color_frame.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(color_frame, text="Color:", bg=t["bg"], fg=t["fg"], font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        
+        # Color presets
+        color_presets_frame = tk.Frame(self.paint_settings_frame, bg=t["bg"])
+        color_presets_frame.pack(fill=tk.X, padx=8, pady=4)
+        color_presets = [
+            ("Black", (0, 0, 0)),
+            ("White", (255, 255, 255)),
+            ("Red", (0, 0, 255)),
+            ("Green", (0, 255, 0)),
+            ("Blue", (255, 0, 0)),
+        ]
+        self.paint_color_buttons = []
+        for color_name, bgr_color in color_presets:
+            btn = tk.Button(color_presets_frame, text=color_name, width=8,
+                           bg=f"#{bgr_color[2]:02x}{bgr_color[1]:02x}{bgr_color[0]:02x}",
+                           fg="white" if sum(bgr_color) < 384 else "black",
+                           command=lambda c=bgr_color: self._set_paint_color(c))
+            btn.pack(side=tk.LEFT, padx=2)
+            self.paint_color_buttons.append(btn)
+        
+        # Color picker button
+        color_picker_btn = ttk.Button(color_presets_frame, text="More...", width=8,
+                                    command=self._show_color_picker)
+        color_picker_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Initially hide paint settings (shown when paint mode is selected)
+        paint_section.pack_forget()
+        self.paint_settings_section = paint_section
+        
         # Quick actions (last section - store reference for scroll bounds)
         action_section = CollapsibleFrame(frame, "Quick Actions", theme=t)
         action_section.pack(fill=tk.X, padx=8, pady=4)
         last_section_ref[0] = action_section
+        self.tools_sections["Quick Actions"] = action_section
         
         ttk.Button(action_section.content, text="Undo", 
                    command=self._undo).pack(fill=tk.X, padx=8, pady=2)
@@ -1301,6 +1405,13 @@ class RePlanApp:
         self._cancel()
         # Update status bar
         self.status_bar.set_item_text("mode", mode.capitalize())
+        
+        # Show/hide paint settings based on mode
+        if hasattr(self, 'paint_settings_section'):
+            if mode == "paint":
+                self.paint_settings_section.pack(fill=tk.X, padx=8, pady=4, before=self.tools_sections.get("Quick Actions"))
+            else:
+                self.paint_settings_section.pack_forget()
     
     def _cancel(self):
         """Cancel current operation."""
@@ -4423,6 +4534,30 @@ class RePlanApp:
         self.renderer.invalidate_cache()
         self._invalidate_working_image_cache()
         self._update_display()
+    
+    def _update_paint_brush_size(self):
+        """Update paint brush size from UI control."""
+        try:
+            self.paint_brush_size = max(1, min(100, int(self.paint_brush_size_var.get())))
+        except:
+            pass
+    
+    def _set_paint_color(self, bgr_color: tuple):
+        """Set paint color (BGR tuple)."""
+        self.paint_color = bgr_color
+    
+    def _show_color_picker(self):
+        """Show color picker dialog for custom paint color."""
+        # Convert BGR to RGB for color picker
+        rgb_color = (self.paint_color[2], self.paint_color[1], self.paint_color[0])
+        # Convert to hex for colorchooser
+        hex_color = f"#{rgb_color[0]:02x}{rgb_color[1]:02x}{rgb_color[2]:02x}"
+        
+        color = colorchooser.askcolor(color=hex_color, title="Select Paint Color", parent=self.root)
+        if color[1]:  # User selected a color
+            rgb = color[0]  # RGB tuple
+            # Convert RGB to BGR for OpenCV
+            self.paint_color = (int(rgb[2]), int(rgb[1]), int(rgb[0]))
     
     def _flood_fill(self, x: int, y: int):
         page = self._get_current_page()
@@ -9614,6 +9749,13 @@ class RePlanApp:
                 print(f"DEBUG: Error getting panel widths: {e}")
                 pass
         
+        # Save collapse/expand state of Tools panel sections
+        tools_sections_state = {}
+        if hasattr(self, 'tools_sections'):
+            for section_name, section in self.tools_sections.items():
+                if hasattr(section, 'collapsed'):
+                    tools_sections_state[section_name] = section.collapsed
+        
         return {
             "current_page_id": self.current_page_id,
             "zoom_level": self.zoom_level,
@@ -9624,6 +9766,7 @@ class RePlanApp:
             "sidebar_width_ratio": sidebar_width_ratio,
             "center_width": center_width,
             "center_width_ratio": center_width_ratio,
+            "tools_sections_state": tools_sections_state,
         }
     
     def _restore_view_state(self, view_state: dict):
@@ -9914,6 +10057,19 @@ class RePlanApp:
                         restore_panel_widths()
                 
                 self.root.after(1000, lambda: check_and_restore(0))
+        
+        # Restore collapse/expand state of Tools panel sections
+        tools_sections_state = view_state.get("tools_sections_state", {})
+        if tools_sections_state and hasattr(self, 'tools_sections'):
+            def restore_sections_state():
+                for section_name, collapsed in tools_sections_state.items():
+                    if section_name in self.tools_sections:
+                        section = self.tools_sections[section_name]
+                        if hasattr(section, 'collapsed'):
+                            if section.collapsed != collapsed:
+                                section.toggle()  # Toggle to desired state
+            # Wait for UI to be ready
+            self.root.after(200, restore_sections_state)
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")

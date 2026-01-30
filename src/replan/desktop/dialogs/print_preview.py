@@ -205,7 +205,7 @@ class PrintPreviewDialog(BaseDialog):
             messagebox.showerror("Preview Error", f"Error generating preview: {e}", parent=self)
     
     def _on_print(self):
-        """Handle print button - send to printer spooler."""
+        """Handle print button - use Windows print dialog via spooler."""
         if self.preview_image is None:
             messagebox.showerror("Print Error", "No preview image available", parent=self)
             return
@@ -215,78 +215,94 @@ class PrintPreviewDialog(BaseDialog):
             rgb_image = cv2.cvtColor(self.preview_image, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb_image)
             
-            # Use PIL's print functionality (works on Windows, macOS, Linux)
-            # This opens the system print dialog
-            pil_image.show()  # This will open in default image viewer
-            
-            # For actual printing, we need to use platform-specific code
             import platform
             if platform.system() == "Windows":
-                # Windows: Use win32print if available, otherwise fall back to PIL
+                # Windows: Use win32print/win32ui for proper print dialog
                 try:
                     from PIL import ImageWin
                     import win32print
                     import win32ui
+                    import win32con
                     
                     # Get default printer
                     printer_name = win32print.GetDefaultPrinter()
-                    hprinter = win32print.OpenPrinter(printer_name)
-                    try:
-                        hdc = win32ui.CreateDC()
-                        hdc.CreatePrinterDC(printer_name)
-                        hdc.StartDoc("RePlan Print")
-                        hdc.StartPage()
-                        
-                        # Calculate scaling to fit page
-                        printer_size = hdc.GetDeviceCaps(110), hdc.GetDeviceCaps(111)  # HORZRES, VERTRES
-                        printer_dpi = hdc.GetDeviceCaps(88), hdc.GetDeviceCaps(90)  # LOGPIXELSX, LOGPIXELSY
-                        
-                        # Scale image to fit printable area
-                        img_width = pil_image.width
-                        img_height = pil_image.height
-                        scale_x = printer_size[0] / img_width
-                        scale_y = printer_size[1] / img_height
-                        scale = min(scale_x, scale_y, 1.0)  # Don't scale up
-                        
-                        new_width = int(img_width * scale)
-                        new_height = int(img_height * scale)
-                        
-                        # Center image
-                        x = (printer_size[0] - new_width) // 2
-                        y = (printer_size[1] - new_height) // 2
-                        
-                        # Print image
-                        dib = ImageWin.Dib(pil_image)
-                        dib.draw(hdc.GetHandleOutput(), (x, y, x + new_width, y + new_height))
-                        
-                        hdc.EndPage()
-                        hdc.EndDoc()
-                        hdc.DeleteDC()
-                    finally:
-                        win32print.ClosePrinter(hprinter)
                     
-                    messagebox.showinfo("Print", f"Sent to printer: {printer_name}", parent=self)
+                    # Create device context for printer
+                    hdc = win32ui.CreateDC()
+                    hdc.CreatePrinterDC(printer_name)
+                    
+                    # Start print job
+                    hdc.StartDoc("RePlan Print")
+                    hdc.StartPage()
+                    
+                    # Get printer capabilities
+                    printer_size = hdc.GetDeviceCaps(110), hdc.GetDeviceCaps(111)  # HORZRES, VERTRES (printable area)
+                    printer_dpi = hdc.GetDeviceCaps(88), hdc.GetDeviceCaps(90)  # LOGPIXELSX, LOGPIXELSY
+                    printer_physical_size = hdc.GetDeviceCaps(110), hdc.GetDeviceCaps(111)  # Physical page size
+                    
+                    # Calculate scaling to fit printable area
+                    img_width = pil_image.width
+                    img_height = pil_image.height
+                    
+                    # Scale to fit printable area while maintaining aspect ratio
+                    scale_x = printer_size[0] / img_width
+                    scale_y = printer_size[1] / img_height
+                    scale = min(scale_x, scale_y, 1.0)  # Don't scale up
+                    
+                    new_width = int(img_width * scale)
+                    new_height = int(img_height * scale)
+                    
+                    # Center image on page
+                    x = (printer_size[0] - new_width) // 2
+                    y = (printer_size[1] - new_height) // 2
+                    
+                    # Print image using ImageWin
+                    dib = ImageWin.Dib(pil_image)
+                    dib.draw(hdc.GetHandleOutput(), (x, y, x + new_width, y + new_height))
+                    
+                    hdc.EndPage()
+                    hdc.EndDoc()
+                    hdc.DeleteDC()
+                    
+                    messagebox.showinfo("Print", f"Print job sent to printer: {printer_name}", parent=self)
                     self.result = self.settings
                     self.destroy()
                     return
                 except ImportError:
-                    # Fall back to PIL's print method
+                    # Fall back to system print dialog via temp file
+                    pass
+                except Exception as e:
+                    # If direct printing fails, fall back to system dialog
+                    import tempfile
+                    import os
+                    temp_path = os.path.join(tempfile.gettempdir(), "replan_print.png")
+                    pil_image.save(temp_path)
+                    os.startfile(temp_path, "print")  # Opens Windows print dialog
+                    messagebox.showinfo("Print", "Opening print dialog...", parent=self)
+                    self.result = self.settings
+                    self.destroy()
+                    return
+            
+            # Fallback for non-Windows or if win32 modules unavailable
+            # Use system print dialog via temp file
+            import tempfile
+            import os
+            temp_path = os.path.join(tempfile.gettempdir(), "replan_print.png")
+            pil_image.save(temp_path)
+            if platform.system() == "Windows":
+                os.startfile(temp_path, "print")  # Opens Windows print dialog
+            else:
+                # For macOS/Linux, try to open with default print command
+                import subprocess
+                try:
+                    if platform.system() == "Darwin":  # macOS
+                        subprocess.run(["lpr", temp_path])
+                    else:  # Linux
+                        subprocess.run(["lp", temp_path])
+                except:
                     pass
             
-            # Fallback: Use PIL's print method (opens system print dialog)
-            # Note: This may not work on all platforms
-            try:
-                pil_image.print()
-                messagebox.showinfo("Print", "Print job sent to printer", parent=self)
-            except Exception as e:
-                # If PIL print doesn't work, save to temp file and open print dialog
-                import tempfile
-                import os
-                temp_path = os.path.join(tempfile.gettempdir(), "replan_print.png")
-                pil_image.save(temp_path)
-                os.startfile(temp_path, "print")  # Windows
-                messagebox.showinfo("Print", "Opening print dialog...", parent=self)
-            
+            messagebox.showinfo("Print", "Opening print dialog...", parent=self)
             self.result = self.settings
             self.destroy()
             
