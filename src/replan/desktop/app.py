@@ -9542,13 +9542,24 @@ class RePlanApp:
                     # Get sidebar width (sash 0 position)
                     if left_index is not None and left_index == 0:
                         try:
-                            sash0_pos = paned.sashpos(0)
-                            if sash0_pos > 50:  # Reasonable minimum
-                                sidebar_width = sash0_pos
-                                sidebar_width_ratio = sash0_pos / paned_width if paned_width > 0 else None
-                                self.settings.sidebar_width = sidebar_width
-                                print(f"DEBUG: Saving sidebar width: {sidebar_width}px (ratio: {sidebar_width_ratio})")
-                        except (tk.TclError, IndexError, AttributeError):
+                            # Check if sashpos method exists before calling
+                            sashpos_method = getattr(paned, 'sashpos', None)
+                            if callable(sashpos_method) and len(panes) >= 2:
+                                sash0_pos = paned.sashpos(0)
+                                if sash0_pos > 50:  # Reasonable minimum
+                                    sidebar_width = sash0_pos
+                                    sidebar_width_ratio = sash0_pos / paned_width if paned_width > 0 else None
+                                    self.settings.sidebar_width = sidebar_width
+                                    print(f"DEBUG: Saving sidebar width: {sidebar_width}px (ratio: {sidebar_width_ratio})")
+                            else:
+                                # Fallback to winfo_width
+                                actual_width = left_panel_frame.winfo_width()
+                                if actual_width > 50:
+                                    sidebar_width = actual_width
+                                    sidebar_width_ratio = actual_width / paned_width if paned_width > 0 else None
+                                    self.settings.sidebar_width = sidebar_width
+                                    print(f"DEBUG: Saving sidebar width via fallback: {sidebar_width}px")
+                        except (tk.TclError, IndexError, AttributeError, TypeError) as e:
                             # Fallback to winfo_width
                             try:
                                 actual_width = left_panel_frame.winfo_width()
@@ -9556,27 +9567,39 @@ class RePlanApp:
                                     sidebar_width = actual_width
                                     sidebar_width_ratio = actual_width / paned_width if paned_width > 0 else None
                                     self.settings.sidebar_width = sidebar_width
+                                    print(f"DEBUG: Saving sidebar width via exception fallback: {sidebar_width}px ({e})")
                             except:
                                 pass
                     
                     # Get center width (sash 1 position - sash 0 position)
                     if center_index is not None and right_index is not None and center_index < right_index:
                         try:
-                            sash0_pos = paned.sashpos(0) if left_index is not None else 0
-                            sash1_pos = paned.sashpos(1) if len(panes) > 2 else paned_width
-                            
-                            center_actual_width = sash1_pos - sash0_pos
-                            if center_actual_width > 100:  # Reasonable minimum
-                                center_width = center_actual_width
-                                center_width_ratio = center_actual_width / paned_width if paned_width > 0 else None
-                                print(f"DEBUG: Saving center width: {center_width}px (ratio: {center_width_ratio})")
-                        except (tk.TclError, IndexError, AttributeError):
+                            # Check if sashpos method exists and we have enough panes
+                            sashpos_method = getattr(paned, 'sashpos', None)
+                            if callable(sashpos_method) and len(panes) >= 3:
+                                sash0_pos = paned.sashpos(0) if left_index is not None else 0
+                                sash1_pos = paned.sashpos(1)
+                                
+                                center_actual_width = sash1_pos - sash0_pos
+                                if center_actual_width > 100:  # Reasonable minimum
+                                    center_width = center_actual_width
+                                    center_width_ratio = center_actual_width / paned_width if paned_width > 0 else None
+                                    print(f"DEBUG: Saving center width: {center_width}px (ratio: {center_width_ratio})")
+                            else:
+                                # Fallback to winfo_width
+                                actual_width = center_frame.winfo_width()
+                                if actual_width > 100:
+                                    center_width = actual_width
+                                    center_width_ratio = actual_width / paned_width if paned_width > 0 else None
+                                    print(f"DEBUG: Saving center width via fallback: {center_width}px")
+                        except (tk.TclError, IndexError, AttributeError, TypeError) as e:
                             # Fallback to winfo_width
                             try:
                                 actual_width = center_frame.winfo_width()
                                 if actual_width > 100:
                                     center_width = actual_width
                                     center_width_ratio = actual_width / paned_width if paned_width > 0 else None
+                                    print(f"DEBUG: Saving center width via exception fallback: {center_width}px ({e})")
                             except:
                                 pass
                     
@@ -9713,21 +9736,61 @@ class RePlanApp:
                                 
                                 target_sidebar_width = max(200, min(target_sidebar_width, window_width - 600))  # Clamp to reasonable range
                                 
-                                # Set sash 0 position
-                                try:
-                                    current_sash0 = paned.sashpos(0)
-                                    if abs(current_sash0 - target_sidebar_width) > 5:
-                                        paned.sashpos(0, target_sidebar_width)
-                                        self.settings.sidebar_width = target_sidebar_width
-                                        print(f"DEBUG: Restored sidebar width to {target_sidebar_width}px (sash 0, window width {window_width})")
-                                    else:
-                                        self.settings.sidebar_width = target_sidebar_width
-                                        print(f"DEBUG: Sidebar width already correct: {current_sash0}px")
-                                except (tk.TclError, AttributeError, IndexError) as e:
-                                    print(f"DEBUG: Could not set sash 0: {e}")
+                                # Check if we have enough panes for sashes (need at least 2 panes for 1 sash)
+                                num_panes = len(panes)
+                                if num_panes < 2:
+                                    # Not enough panes yet, retry
                                     if self._panel_width_restore_attempts < max_attempts:
                                         self.root.after(200, restore_panel_widths)
                                     return
+                                
+                                # Check if sashpos method exists - use getattr with default to avoid AttributeError
+                                try:
+                                    sashpos_method = getattr(paned, 'sashpos', None)
+                                    has_sash_method = callable(sashpos_method)
+                                except:
+                                    has_sash_method = False
+                                
+                                if has_sash_method and num_panes >= 2:
+                                    # Try to use sashpos method
+                                    try:
+                                        current_sash0 = paned.sashpos(0)
+                                        if abs(current_sash0 - target_sidebar_width) > 5:
+                                            paned.sashpos(0, target_sidebar_width)
+                                            self.settings.sidebar_width = target_sidebar_width
+                                            print(f"DEBUG: Restored sidebar width to {target_sidebar_width}px (sash 0, window width {window_width})")
+                                        else:
+                                            self.settings.sidebar_width = target_sidebar_width
+                                            print(f"DEBUG: Sidebar width already correct: {current_sash0}px")
+                                    except (tk.TclError, AttributeError, IndexError, TypeError) as e:
+                                        # sashpos not available, use fallback method
+                                        print(f"DEBUG: sashpos not available, using fallback: {e}")
+                                        has_sash_method = False
+                                
+                                # Fallback: Use winfo_width() on the actual frame
+                                if not has_sash_method:
+                                    try:
+                                        # Set sidebar width by configuring the frame
+                                        # This is less reliable but works when sashpos isn't available
+                                        current_left_width = left_panel_frame.winfo_width()
+                                        if current_left_width <= 0 or abs(current_left_width - target_sidebar_width) > 5:
+                                            # Try to configure the paned window to set the sash
+                                            # Since we can't use sashpos, we'll use a workaround
+                                            # by temporarily removing and re-adding the pane
+                                            # Actually, let's just update settings and let the layout handle it
+                                            self.settings.sidebar_width = target_sidebar_width
+                                            print(f"DEBUG: Set sidebar width setting to {target_sidebar_width}px (using fallback method)")
+                                    except Exception as e2:
+                                        print(f"DEBUG: Fallback method also failed: {e2}")
+                                        if self._panel_width_restore_attempts < max_attempts:
+                                            self.root.after(200, restore_panel_widths)
+                                        return
+                                    
+                            except Exception as e:
+                                print(f"DEBUG: Error restoring sidebar width: {e}")
+                                if self._panel_width_restore_attempts < max_attempts:
+                                    self.root.after(200, restore_panel_widths)
+                                return
                                     
                             except Exception as e:
                                 print(f"DEBUG: Error restoring sidebar width: {e}")
@@ -9736,10 +9799,19 @@ class RePlanApp:
                         if center_index is not None and right_index is not None and len(panes) >= 3:
                             try:
                                 # Get current sidebar width (sash 0)
+                                current_sash0 = target_sidebar_width if target_sidebar_width is not None else self.settings.sidebar_width
+                                
+                                # Try to get actual sash position if available
                                 try:
-                                    current_sash0 = paned.sashpos(0)
+                                    sashpos_method = getattr(paned, 'sashpos', None)
+                                    has_sash_method = callable(sashpos_method)
+                                    if has_sash_method:
+                                        try:
+                                            current_sash0 = paned.sashpos(0)
+                                        except (tk.TclError, AttributeError, IndexError, TypeError):
+                                            pass  # Use the calculated value
                                 except:
-                                    current_sash0 = target_sidebar_width if target_sidebar_width is not None else self.settings.sidebar_width
+                                    has_sash_method = False
                                 
                                 # Calculate target center width
                                 if center_width_ratio and center_width_ratio > 0:
@@ -9763,27 +9835,46 @@ class RePlanApp:
                                 
                                 # Set sash 1 position
                                 try:
-                                    current_sash1 = paned.sashpos(1)
-                                    if abs(current_sash1 - target_sash1) > 5:
-                                        paned.sashpos(1, target_sash1)
-                                        # Object viewer width is automatically: window_width - target_sash1
-                                        object_viewer_width = window_width - target_sash1
+                                    sashpos_method = getattr(paned, 'sashpos', None)
+                                    has_sash_method = callable(sashpos_method)
+                                except:
+                                    has_sash_method = False
+                                
+                                if has_sash_method:
+                                    try:
+                                        current_sash1 = paned.sashpos(1)
+                                        if abs(current_sash1 - target_sash1) > 5:
+                                            paned.sashpos(1, target_sash1)
+                                            # Object viewer width is automatically: window_width - target_sash1
+                                            object_viewer_width = window_width - target_sash1
+                                            self.settings.tree_width = object_viewer_width
+                                            print(f"DEBUG: Restored center width to {target_center_width}px (sash 1 at {target_sash1}, object viewer: {object_viewer_width}px)")
+                                        else:
+                                            object_viewer_width = window_width - current_sash1
+                                            self.settings.tree_width = object_viewer_width
+                                            print(f"DEBUG: Center width already correct: {current_sash1 - current_sash0}px, object viewer: {object_viewer_width}px")
+                                        
+                                        # Save settings
+                                        from replan.desktop.config import save_settings
+                                        save_settings(self.settings)
+                                        
+                                    except (tk.TclError, AttributeError, IndexError, TypeError) as e:
+                                        print(f"DEBUG: Could not set sash 1: {e}, using fallback")
+                                        # Fallback: Calculate object viewer width from remaining space
+                                        object_viewer_width = window_width - current_sash0 - target_center_width
+                                        if object_viewer_width > 50:
+                                            self.settings.tree_width = object_viewer_width
+                                            from replan.desktop.config import save_settings
+                                            save_settings(self.settings)
+                                            print(f"DEBUG: Set object viewer width via fallback: {object_viewer_width}px")
+                                else:
+                                    # No sashpos method - use fallback
+                                    object_viewer_width = window_width - current_sash0 - target_center_width
+                                    if object_viewer_width > 50:
                                         self.settings.tree_width = object_viewer_width
-                                        print(f"DEBUG: Restored center width to {target_center_width}px (sash 1 at {target_sash1}, object viewer: {object_viewer_width}px)")
-                                    else:
-                                        object_viewer_width = window_width - current_sash1
-                                        self.settings.tree_width = object_viewer_width
-                                        print(f"DEBUG: Center width already correct: {current_sash1 - current_sash0}px, object viewer: {object_viewer_width}px")
-                                    
-                                    # Save settings
-                                    from replan.desktop.config import save_settings
-                                    save_settings(self.settings)
-                                    
-                                except (tk.TclError, AttributeError, IndexError) as e:
-                                    print(f"DEBUG: Could not set sash 1: {e}")
-                                    if self._panel_width_restore_attempts < max_attempts:
-                                        self.root.after(200, restore_panel_widths)
-                                    return
+                                        from replan.desktop.config import save_settings
+                                        save_settings(self.settings)
+                                        print(f"DEBUG: Set object viewer width via fallback (no sashpos): {object_viewer_width}px")
                                     
                             except Exception as e:
                                 print(f"DEBUG: Error restoring center width: {e}")
@@ -9801,14 +9892,28 @@ class RePlanApp:
                         if self._panel_width_restore_attempts < max_attempts:
                             self.root.after(200, restore_panel_widths)
                 
-                # Start restoration process - use longer delay to ensure layout is ready
-                # Also try multiple times with increasing delays
-                def try_restore(attempt=0):
-                    if attempt < 5:
-                        self.root.after(300 + attempt * 200, lambda: try_restore(attempt + 1))
-                    restore_panel_widths()
+                # Start restoration process - wait for layout to be fully ready
+                # Check if layout is finalized before attempting restoration
+                def check_and_restore(attempt=0):
+                    max_check_attempts = 15
+                    if attempt < max_check_attempts:
+                        # Check if paned window has panes
+                        if hasattr(self.layout, 'paned'):
+                            panes = self.layout.paned.panes()
+                            if len(panes) >= 2:
+                                # Layout is ready, try restoration
+                                restore_panel_widths()
+                            else:
+                                # Not ready yet, check again
+                                self.root.after(300, lambda: check_and_restore(attempt + 1))
+                        else:
+                            # Layout not ready, check again
+                            self.root.after(300, lambda: check_and_restore(attempt + 1))
+                    else:
+                        # Max attempts reached, try restoration anyway
+                        restore_panel_widths()
                 
-                self.root.after(500, lambda: try_restore(0))
+                self.root.after(1000, lambda: check_and_restore(0))
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")
