@@ -20,7 +20,10 @@ class PanelConfig:
     min_width: int = 200
     max_width: int = 400
     default_width: int = 280
-    side: str = "left"  # "left" or "right"
+    min_height: int = 150  # For top/bottom panels
+    max_height: int = 400
+    default_height: int = 200
+    side: str = "left"  # "left", "right", "top", or "bottom"
 
 
 class ActivityBar(tk.Frame):
@@ -214,8 +217,16 @@ class DockablePanel(tk.Frame):
         self.title_label.bind("<B1-Motion>", self._on_drag_motion)
         self.title_label.bind("<ButtonRelease-1>", self._on_drag_end)
         
-        # Collapse button
-        collapse_icon = "«" if self.config.side == "left" else "»"
+        # Collapse button - different icons for different sides
+        if self.config.side == "left":
+            collapse_icon = "«"
+        elif self.config.side == "right":
+            collapse_icon = "»"
+        elif self.config.side == "top":
+            collapse_icon = "▲"
+        else:  # bottom
+            collapse_icon = "▼"
+        
         self.collapse_btn = tk.Label(
             self.header,
             text=collapse_icon,
@@ -234,10 +245,23 @@ class DockablePanel(tk.Frame):
         self.content = tk.Frame(self, bg=self.theme["bg"])
         self.content.pack(fill=tk.BOTH, expand=True)
         
-        # Border
-        border_side = tk.RIGHT if self.config.side == "left" else tk.LEFT
-        self.border = tk.Frame(self, bg=self.theme["border"], width=1)
-        self.border.pack(side=border_side, fill=tk.Y)
+        # Border - different sides for different panel positions
+        if self.config.side == "left":
+            border_side = tk.RIGHT
+            fill_direction = tk.Y
+        elif self.config.side == "right":
+            border_side = tk.LEFT
+            fill_direction = tk.Y
+        elif self.config.side == "top":
+            border_side = tk.BOTTOM
+            fill_direction = tk.X
+        else:  # bottom
+            border_side = tk.TOP
+            fill_direction = tk.X
+        
+        self.border = tk.Frame(self, bg=self.theme["border"], width=1 if fill_direction == tk.Y else 1, 
+                              height=1 if fill_direction == tk.X else 1)
+        self.border.pack(side=border_side, fill=fill_direction)
         
     def toggle_collapse(self):
         """Toggle collapsed state."""
@@ -245,10 +269,26 @@ class DockablePanel(tk.Frame):
         
         if self.collapsed:
             self.content.pack_forget()
-            collapse_icon = "»" if self.config.side == "left" else "«"
+            # Set icon to indicate expansion direction
+            if self.config.side == "left":
+                collapse_icon = "»"
+            elif self.config.side == "right":
+                collapse_icon = "«"
+            elif self.config.side == "top":
+                collapse_icon = "▼"
+            else:  # bottom
+                collapse_icon = "▲"
         else:
             self.content.pack(fill=tk.BOTH, expand=True)
-            collapse_icon = "«" if self.config.side == "left" else "»"
+            # Set icon to indicate collapse direction
+            if self.config.side == "left":
+                collapse_icon = "«"
+            elif self.config.side == "right":
+                collapse_icon = "»"
+            elif self.config.side == "top":
+                collapse_icon = "▲"
+            else:  # bottom
+                collapse_icon = "▼"
             
         self.collapse_btn.configure(text=collapse_icon)
         
@@ -333,7 +373,7 @@ class ResizableLayout(tk.Frame):
         )
         self.activity_bar.pack(side=tk.LEFT, fill=tk.Y)
         
-        # Main paned window for resizable areas
+        # Main horizontal paned window for left/right areas
         self.paned = tk.PanedWindow(
             self,
             orient=tk.HORIZONTAL,
@@ -347,8 +387,24 @@ class ResizableLayout(tk.Frame):
         # Left panel area
         self.left_panel_frame = tk.Frame(self.paned, bg=self.theme["bg"])
         
+        # Center area - wrapped in vertical paned window for top/bottom panels
+        self.center_paned = tk.PanedWindow(
+            self.paned,
+            orient=tk.VERTICAL,
+            bg=self.theme["border"],
+            sashwidth=4,
+            sashrelief=tk.FLAT,
+            borderwidth=0
+        )
+        
+        # Top panel area
+        self.top_panel_frame = tk.Frame(self.center_paned, bg=self.theme["bg"])
+        
         # Center area (will contain notebook)
-        self.center_frame = tk.Frame(self.paned, bg=self.theme["bg_base"])
+        self.center_frame = tk.Frame(self.center_paned, bg=self.theme["bg_base"])
+        
+        # Bottom panel area
+        self.bottom_panel_frame = tk.Frame(self.center_paned, bg=self.theme["bg"])
         
         # Right panel area
         self.right_panel_frame = tk.Frame(self.paned, bg=self.theme["bg"])
@@ -374,10 +430,18 @@ class ResizableLayout(tk.Frame):
         # Restore dock state from settings if available
         if hasattr(self.settings, 'panel_dock_states') and panel_id in self.settings.panel_dock_states:
             saved_side = self.settings.panel_dock_states[panel_id]
-            if saved_side in ["left", "right"]:
+            if saved_side in ["left", "right", "top", "bottom"]:
                 config.side = saved_side
         
-        parent = self.left_panel_frame if config.side == "left" else self.right_panel_frame
+        # Determine parent frame based on side
+        if config.side == "left":
+            parent = self.left_panel_frame
+        elif config.side == "right":
+            parent = self.right_panel_frame
+        elif config.side == "top":
+            parent = self.top_panel_frame
+        else:  # bottom
+            parent = self.bottom_panel_frame
         
         panel = DockablePanel(
             parent, config, self.theme,
@@ -394,40 +458,61 @@ class ResizableLayout(tk.Frame):
     
     def finalize_layout(self):
         """Finalize layout after all panels are added."""
-        # Add frames to paned window with minimum sizes to prevent collapse
-        if self.panels:
-            # Check for left panels
-            left_panels = [p for pid, p in self.panels.items() 
-                          if self.panel_configs[pid].side == "left"]
-            if left_panels:
-                self.paned.add(self.left_panel_frame, width=self.settings.sidebar_width, minsize=200)
-                for panel in left_panels:
-                    panel.pack(fill=tk.BOTH, expand=True)
-        
-        # Always add center
-        self.paned.add(self.center_frame, stretch="always", minsize=400)
-        
-        # Check for right panels
+        # Group panels by side
+        left_panels = [p for pid, p in self.panels.items() 
+                      if self.panel_configs[pid].side == "left"]
         right_panels = [p for pid, p in self.panels.items() 
                        if self.panel_configs[pid].side == "right"]
+        top_panels = [p for pid, p in self.panels.items() 
+                     if self.panel_configs[pid].side == "top"]
+        bottom_panels = [p for pid, p in self.panels.items() 
+                        if self.panel_configs[pid].side == "bottom"]
+        
+        # Add left panels to horizontal paned window
+        if left_panels:
+            self.paned.add(self.left_panel_frame, width=self.settings.sidebar_width, minsize=200)
+            for panel in left_panels:
+                panel.pack(fill=tk.BOTH, expand=True)
+        
+        # Setup vertical paned window (center_paned) for top/center/bottom
+        # Add top panels if any
+        if top_panels:
+            self.center_paned.add(self.top_panel_frame, height=200, minsize=150)
+            for panel in top_panels:
+                panel.pack(fill=tk.BOTH, expand=True)
+        
+        # Always add center frame to vertical paned window
+        self.center_paned.add(self.center_frame, stretch="always", minsize=200)
+        
+        # Add bottom panels if any
+        if bottom_panels:
+            self.center_paned.add(self.bottom_panel_frame, height=200, minsize=150)
+            for panel in bottom_panels:
+                panel.pack(fill=tk.BOTH, expand=True)
+        
+        # Add center vertical paned window to horizontal paned window
+        self.paned.add(self.center_paned, stretch="always", minsize=400)
+        
+        # Add right panels to horizontal paned window
         if right_panels:
             self.paned.add(self.right_panel_frame, width=self.settings.tree_width, minsize=200)
             for panel in right_panels:
                 panel.pack(fill=tk.BOTH, expand=True)
             
-            # Bind to paned window sash movement to track panel width changes
-            def on_sash_moved(event=None):
-                """Save sidebar and center widths when sash is moved."""
-                try:
-                    paned_width = self.paned.winfo_width()
-                    if paned_width <= 0:
-                        return
-                    
-                    panes = self.paned.panes()
-                    if len(panes) < 2:
-                        return
-                    
-                    # Save sidebar width (sash 0)
+        # Bind to paned window sash movement to track panel width changes
+        def on_sash_moved(event=None):
+            """Save sidebar and center widths when sash is moved."""
+            try:
+                paned_width = self.paned.winfo_width()
+                if paned_width <= 0:
+                    return
+                
+                panes = self.paned.panes()
+                if len(panes) < 2:
+                    return
+                
+                # Save sidebar width (sash 0) if left panel exists
+                if left_panels:
                     try:
                         sash0_pos = self.paned.sashpos(0)
                         if sash0_pos > 50:
@@ -439,38 +524,65 @@ class ResizableLayout(tk.Frame):
                                 self.settings.sidebar_width = sidebar_width
                         except:
                             pass
-                    
-                    # Save center width (sash 1 - sash 0) and object viewer width
-                    if len(panes) >= 3:
-                        try:
-                            sash0_pos = self.paned.sashpos(0)
-                            sash1_pos = self.paned.sashpos(1)
-                            center_width = sash1_pos - sash0_pos
-                            object_viewer_width = paned_width - sash1_pos
+                
+                # Save object viewer width if right panel exists
+                if right_panels:
+                    try:
+                        # Find the right panel sash position
+                        if left_panels:
+                            # Left panel exists, right panel is last pane
+                            sash_idx = len(panes) - 1
+                        else:
+                            # No left panel, right panel is first pane
+                            sash_idx = 0
+                        
+                        if len(panes) >= 2:
+                            sash_pos = self.paned.sashpos(sash_idx)
+                            object_viewer_width = paned_width - sash_pos
                             
-                            if center_width > 100 and object_viewer_width > 50:
+                            if object_viewer_width > 50:
                                 self.settings.tree_width = object_viewer_width
-                                # Save settings immediately
                                 from replan.desktop.config import save_settings
                                 save_settings(self.settings)
-                        except (tk.TclError, AttributeError, IndexError):
-                            # Fallback to winfo_width
-                            try:
-                                object_viewer_width = self.right_panel_frame.winfo_width()
-                                if object_viewer_width > 50:
-                                    self.settings.tree_width = object_viewer_width
-                                    from replan.desktop.config import save_settings
-                                    save_settings(self.settings)
-                            except:
-                                pass
-                except Exception as e:
-                    pass
-            
-            # Bind to paned window sash movement to track resize
-            self.paned.bind('<ButtonRelease-1>', on_sash_moved)
-            self.paned.bind('<B1-Motion>', lambda e: self.after_idle(on_sash_moved))
-            # Also bind to configure event in case window is resized
-            self.paned.bind('<Configure>', lambda e: self.after_idle(on_sash_moved))
+                    except (tk.TclError, AttributeError, IndexError):
+                        # Fallback to winfo_width
+                        try:
+                            object_viewer_width = self.right_panel_frame.winfo_width()
+                            if object_viewer_width > 50:
+                                self.settings.tree_width = object_viewer_width
+                                from replan.desktop.config import save_settings
+                                save_settings(self.settings)
+                        except:
+                            pass
+            except Exception as e:
+                pass
+        
+        # Bind to paned window sash movement to track resize
+        self.paned.bind('<ButtonRelease-1>', on_sash_moved)
+        self.paned.bind('<B1-Motion>', lambda e: self.after_idle(on_sash_moved))
+        # Also bind to configure event in case window is resized
+        self.paned.bind('<Configure>', lambda e: self.after_idle(on_sash_moved))
+        
+        # Also bind to vertical paned window for top/bottom panels
+        def on_vertical_sash_moved(event=None):
+            """Save top/bottom panel heights when sash is moved."""
+            try:
+                center_paned_height = self.center_paned.winfo_height()
+                if center_paned_height <= 0:
+                    return
+                
+                center_panes = self.center_paned.panes()
+                if len(center_panes) < 2:
+                    return
+                
+                # Could save top/bottom panel heights here if needed
+                # For now, just track that they exist
+            except Exception as e:
+                pass
+        
+        self.center_paned.bind('<ButtonRelease-1>', on_vertical_sash_moved)
+        self.center_paned.bind('<B1-Motion>', lambda e: self.after_idle(on_vertical_sash_moved))
+        self.center_paned.bind('<Configure>', lambda e: self.after_idle(on_vertical_sash_moved))
                 
         # Set initial active panel
         if self.panels:
@@ -616,7 +728,7 @@ class ResizableLayout(tk.Frame):
     
     
     def _show_drop_zones(self, x_root: int, y_root: int):
-        """Show visual drop zones for left/right docking."""
+        """Show visual drop zones for docking (left/right/top/bottom)."""
         try:
             # Get main window geometry
             root_x = self.winfo_rootx()
@@ -627,23 +739,51 @@ class ResizableLayout(tk.Frame):
             if root_width <= 0 or root_height <= 0:
                 return  # Window not ready yet
             
-            # Determine which side to highlight
+            # Determine which side to highlight based on position
             center_x = root_x + root_width // 2
-            target_side = "left" if x_root < center_x else "right"
+            center_y = root_y + root_height // 2
+            
+            # Calculate distances to edges
+            dist_to_left = x_root - root_x
+            dist_to_right = (root_x + root_width) - x_root
+            dist_to_top = y_root - root_y
+            dist_to_bottom = (root_y + root_height) - y_root
+            
+            # Find closest edge (with threshold to avoid accidental docking)
+            threshold = 100  # pixels from edge
+            min_dist = min(dist_to_left, dist_to_right, dist_to_top, dist_to_bottom)
+            
+            if min_dist > threshold:
+                # Too far from edges, use center-based logic
+                if abs(x_root - center_x) > abs(y_root - center_y):
+                    # Horizontal movement dominates
+                    target_side = "left" if x_root < center_x else "right"
+                else:
+                    # Vertical movement dominates
+                    target_side = "top" if y_root < center_y else "bottom"
+            else:
+                # Close to an edge
+                if dist_to_left == min_dist:
+                    target_side = "left"
+                elif dist_to_right == min_dist:
+                    target_side = "right"
+                elif dist_to_top == min_dist:
+                    target_side = "top"
+                else:
+                    target_side = "bottom"
             
             # Remove old drop zone indicators
-            if hasattr(self, 'drop_zone_left') and self.drop_zone_left.winfo_exists():
-                try:
-                    self.drop_zone_left.destroy()
-                except:
-                    pass
-            if hasattr(self, 'drop_zone_right') and self.drop_zone_right.winfo_exists():
-                try:
-                    self.drop_zone_right.destroy()
-                except:
-                    pass
+            for zone_name in ['drop_zone_left', 'drop_zone_right', 'drop_zone_top', 'drop_zone_bottom']:
+                if hasattr(self, zone_name):
+                    zone = getattr(self, zone_name)
+                    if zone and zone.winfo_exists():
+                        try:
+                            zone.destroy()
+                        except:
+                            pass
+                    delattr(self, zone_name)
             
-            # Create drop zone indicators
+            # Create drop zone indicator for target side
             drop_zone = tk.Toplevel(self)
             drop_zone.wm_overrideredirect(True)
             drop_zone.wm_attributes("-alpha", 0.3)
@@ -652,9 +792,15 @@ class ResizableLayout(tk.Frame):
             if target_side == "left":
                 drop_zone.geometry(f"200x{root_height}+{root_x}+{root_y}")
                 self.drop_zone_left = drop_zone
-            else:
+            elif target_side == "right":
                 drop_zone.geometry(f"200x{root_height}+{root_x + root_width - 200}+{root_y}")
                 self.drop_zone_right = drop_zone
+            elif target_side == "top":
+                drop_zone.geometry(f"{root_width}x200+{root_x}+{root_y}")
+                self.drop_zone_top = drop_zone
+            else:  # bottom
+                drop_zone.geometry(f"{root_width}x200+{root_x}+{root_y + root_height - 200}")
+                self.drop_zone_bottom = drop_zone
         except Exception as e:
             # Ignore errors in drop zone display
             pass
@@ -671,30 +817,55 @@ class ResizableLayout(tk.Frame):
             delattr(self, 'drag_preview')
         
         # Clean up drop zones
-        if hasattr(self, 'drop_zone_left'):
-            try:
-                if self.drop_zone_left.winfo_exists():
-                    self.drop_zone_left.destroy()
-            except:
-                pass
-            delattr(self, 'drop_zone_left')
-        if hasattr(self, 'drop_zone_right'):
-            try:
-                if self.drop_zone_right.winfo_exists():
-                    self.drop_zone_right.destroy()
-            except:
-                pass
-            delattr(self, 'drop_zone_right')
+        for zone_name in ['drop_zone_left', 'drop_zone_right', 'drop_zone_top', 'drop_zone_bottom']:
+            if hasattr(self, zone_name):
+                zone = getattr(self, zone_name)
+                if zone and zone.winfo_exists():
+                    try:
+                        zone.destroy()
+                    except:
+                        pass
+                delattr(self, zone_name)
         
         # Determine target side
         try:
             root_x = self.winfo_rootx()
+            root_y = self.winfo_rooty()
             root_width = self.winfo_width()
-            if root_width <= 0:
+            root_height = self.winfo_height()
+            
+            if root_width <= 0 or root_height <= 0:
                 return  # Window not ready
             
             center_x = root_x + root_width // 2
-            target_side = "left" if x_root < center_x else "right"
+            center_y = root_y + root_height // 2
+            
+            # Calculate distances to edges
+            dist_to_left = x_root - root_x
+            dist_to_right = (root_x + root_width) - x_root
+            dist_to_top = y_root - root_y
+            dist_to_bottom = (root_y + root_height) - y_root
+            
+            # Find closest edge (with threshold)
+            threshold = 100
+            min_dist = min(dist_to_left, dist_to_right, dist_to_top, dist_to_bottom)
+            
+            if min_dist > threshold:
+                # Use center-based logic
+                if abs(x_root - center_x) > abs(y_root - center_y):
+                    target_side = "left" if x_root < center_x else "right"
+                else:
+                    target_side = "top" if y_root < center_y else "bottom"
+            else:
+                # Close to an edge
+                if dist_to_left == min_dist:
+                    target_side = "left"
+                elif dist_to_right == min_dist:
+                    target_side = "right"
+                elif dist_to_top == min_dist:
+                    target_side = "top"
+                else:
+                    target_side = "bottom"
             
             # Get panel ID
             panel_id = None
@@ -732,8 +903,15 @@ class ResizableLayout(tk.Frame):
         was_collapsed = panel.collapsed
         content_setup_callback = self.panel_content_setup_callbacks.get(panel_id)
         
-        # Get new parent
-        new_parent = self.left_panel_frame if new_side == "left" else self.right_panel_frame
+        # Get new parent based on side
+        if new_side == "left":
+            new_parent = self.left_panel_frame
+        elif new_side == "right":
+            new_parent = self.right_panel_frame
+        elif new_side == "top":
+            new_parent = self.top_panel_frame
+        else:  # bottom
+            new_parent = self.bottom_panel_frame
         
         # Destroy old panel (tkinter widgets can't be reparented)
         panel.destroy()
@@ -770,23 +948,28 @@ class ResizableLayout(tk.Frame):
     
     def _rebuild_paned_structure(self):
         """Rebuild paned window structure after panel repositioning."""
-        # Get current pane list
+        # Get current pane list from horizontal paned window
         panes = list(self.paned.panes())
         
-        # Check which frames should be present
+        # Check which panels exist on each side
         left_panels = [pid for pid, p in self.panels.items() 
                       if self.panel_configs[pid].side == "left"]
         right_panels = [pid for pid, p in self.panels.items() 
                        if self.panel_configs[pid].side == "right"]
+        top_panels = [pid for pid, p in self.panels.items() 
+                     if self.panel_configs[pid].side == "top"]
+        bottom_panels = [pid for pid, p in self.panels.items() 
+                       if self.panel_configs[pid].side == "bottom"]
         
-        # Determine which frames should be in paned window
         has_left = len(left_panels) > 0
         has_right = len(right_panels) > 0
+        has_top = len(top_panels) > 0
+        has_bottom = len(bottom_panels) > 0
         
-        # Check current state - need to check by widget identity, not just membership
+        # Check current state of horizontal paned window
         has_left_frame = False
         has_right_frame = False
-        has_center_frame = False
+        has_center_paned = False
         for pane_id in panes:
             try:
                 pane_widget = self.paned.nametowidget(pane_id)
@@ -794,14 +977,14 @@ class ResizableLayout(tk.Frame):
                     has_left_frame = True
                 elif pane_widget == self.right_panel_frame:
                     has_right_frame = True
-                elif pane_widget == self.center_frame:
-                    has_center_frame = True
+                elif pane_widget == self.center_paned:
+                    has_center_paned = True
             except:
                 pass
         
-        # Only rebuild if structure needs to change
-        if (has_left != has_left_frame) or (has_right != has_right_frame) or not has_center_frame:
-            # Remove all panes
+        # Rebuild horizontal paned window if needed
+        if (has_left != has_left_frame) or (has_right != has_right_frame) or not has_center_paned:
+            # Remove all panes from horizontal paned window
             for pane in panes:
                 try:
                     self.paned.remove(pane)
@@ -813,16 +996,57 @@ class ResizableLayout(tk.Frame):
                 width = self.settings.sidebar_width
                 self.paned.add(self.left_panel_frame, width=width, minsize=200)
             
-            # Always add center
-            self.paned.add(self.center_frame, stretch="always", minsize=400)
+            # Always add center vertical paned window
+            self.paned.add(self.center_paned, stretch="always", minsize=400)
             
             # Add right panels frame if there are right panels
             if has_right:
                 width = self.settings.tree_width
                 self.paned.add(self.right_panel_frame, width=width, minsize=200)
+        
+        # Now rebuild vertical paned window (center_paned)
+        center_panes = list(self.center_paned.panes())
+        has_top_frame = False
+        has_bottom_frame = False
+        has_center_frame_in_center = False
+        
+        for pane_id in center_panes:
+            try:
+                pane_widget = self.center_paned.nametowidget(pane_id)
+                if pane_widget == self.top_panel_frame:
+                    has_top_frame = True
+                elif pane_widget == self.bottom_panel_frame:
+                    has_bottom_frame = True
+                elif pane_widget == self.center_frame:
+                    has_center_frame_in_center = True
+            except:
+                pass
+        
+        # Rebuild vertical paned window if needed
+        if (has_top != has_top_frame) or (has_bottom != has_bottom_frame) or not has_center_frame_in_center:
+            # Remove all panes from vertical paned window
+            for pane in center_panes:
+                try:
+                    self.center_paned.remove(pane)
+                except:
+                    pass
             
-            # Force update
-            self.paned.update_idletasks()
+            # Re-add panes in correct order (top to bottom)
+            if has_top:
+                height = 200  # Default height for top panels
+                self.center_paned.add(self.top_panel_frame, height=height, minsize=150)
+            
+            # Always add center frame
+            self.center_paned.add(self.center_frame, stretch="always", minsize=200)
+            
+            # Add bottom panels frame if there are bottom panels
+            if has_bottom:
+                height = 200  # Default height for bottom panels
+                self.center_paned.add(self.bottom_panel_frame, height=height, minsize=150)
+        
+        # Force update
+        self.paned.update_idletasks()
+        self.center_paned.update_idletasks()
     
     def _save_panel_dock_state(self, panel_id: str, side: str):
         """Save panel dock state to settings."""
