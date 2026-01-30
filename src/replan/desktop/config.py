@@ -83,7 +83,8 @@ class AppSettings:
     compact_toolbar: bool = False
     
     # Panel docking states (panel_id -> side: "left" or "right")
-    panel_dock_states: Dict[str, str] = field(default_factory=dict)
+    panel_dock_states: Dict[str, str] = field(default_factory=dict)  # Maps panel_id to side ("left", "right", "top", "bottom", "floating")
+    floating_panel_geometries: Dict[str, str] = field(default_factory=dict)  # Maps panel_id to geometry string for floating windows
     
     # Auto-detection
     auto_detect_text: bool = False  # Automatically detect text regions when pages are loaded

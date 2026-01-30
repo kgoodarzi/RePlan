@@ -23,7 +23,7 @@ class PanelConfig:
     min_height: int = 150  # For top/bottom panels
     max_height: int = 400
     default_height: int = 200
-    side: str = "left"  # "left", "right", "top", or "bottom"
+    side: str = "left"  # "left", "right", "top", "bottom", or "floating"
 
 
 class ActivityBar(tk.Frame):
@@ -360,6 +360,7 @@ class ResizableLayout(tk.Frame):
         self.settings = settings
         self.panels: Dict[str, DockablePanel] = {}
         self.panel_configs: Dict[str, PanelConfig] = {}
+        self.floating_windows: Dict[str, FloatingPanelWindow] = {}
         self.current_layout_mode = "full"
         
         self._setup_structure()
@@ -430,8 +431,27 @@ class ResizableLayout(tk.Frame):
         # Restore dock state from settings if available
         if hasattr(self.settings, 'panel_dock_states') and panel_id in self.settings.panel_dock_states:
             saved_side = self.settings.panel_dock_states[panel_id]
-            if saved_side in ["left", "right", "top", "bottom"]:
+            if saved_side in ["left", "right", "top", "bottom", "floating"]:
                 config.side = saved_side
+        
+        # Handle floating panels
+        if config.side == "floating":
+            # Create panel in a temporary parent first, then float it
+            temp_parent = self.left_panel_frame
+            panel = DockablePanel(
+                temp_parent, config, self.theme,
+                on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
+                on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
+            )
+            self.panels[panel_id] = panel
+            
+            # Float it immediately
+            self._float_panel(panel_id, panel)
+            
+            # Add to activity bar
+            self.activity_bar.add_panel_button(panel_id, config.icon, config.title)
+            
+            return panel
         
         # Determine parent frame based on side
         if config.side == "left":
@@ -665,8 +685,19 @@ class ResizableLayout(tk.Frame):
         """Show a specific panel."""
         if panel_id in self.panels:
             panel = self.panels[panel_id]
-            if not panel.winfo_viewable():
-                panel.pack(fill=tk.BOTH, expand=True)
+            config = self.panel_configs[panel_id]
+            
+            # Handle floating panels
+            if config.side == "floating":
+                if panel_id in self.floating_windows:
+                    floating_window = self.floating_windows[panel_id]
+                    floating_window.deiconify()  # Show window if minimized
+                    floating_window.lift()  # Bring to front
+                    floating_window.focus()
+            else:
+                # Docked panel
+                if not panel.winfo_viewable():
+                    panel.pack(fill=tk.BOTH, expand=True)
             self.activity_bar.set_active(panel_id)
             
     def hide_panel(self, panel_id: str):
@@ -850,7 +881,14 @@ class ResizableLayout(tk.Frame):
             threshold = 100
             min_dist = min(dist_to_left, dist_to_right, dist_to_top, dist_to_bottom)
             
-            if min_dist > threshold:
+            # Check if dragging outside window bounds (floating)
+            outside_window = (x_root < root_x - 50 or x_root > root_x + root_width + 50 or
+                            y_root < root_y - 50 or y_root > root_y + root_height + 50)
+            
+            if outside_window:
+                # Dragging outside window - float the panel
+                target_side = "floating"
+            elif min_dist > threshold:
                 # Use center-based logic
                 if abs(x_root - center_x) > abs(y_root - center_y):
                     target_side = "left" if x_root < center_x else "right"
@@ -903,6 +941,11 @@ class ResizableLayout(tk.Frame):
         was_collapsed = panel.collapsed
         content_setup_callback = self.panel_content_setup_callbacks.get(panel_id)
         
+        # Handle floating windows separately
+        if new_side == "floating":
+            self._float_panel(panel_id, panel)
+            return
+        
         # Get new parent based on side
         if new_side == "left":
             new_parent = self.left_panel_frame
@@ -920,11 +963,18 @@ class ResizableLayout(tk.Frame):
         config.side = new_side
         
         # Create new panel in new location
-        new_panel = DockablePanel(
-            new_parent, config, self.theme,
-            on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
-            on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
-        )
+        # If panel was floating, reuse it (it's already been removed from floating window)
+        if config.side == "floating" and panel_id in self.panels:
+            # Panel already exists, just reparent it
+            panel.master = new_parent
+            new_panel = panel
+        else:
+            # Create new panel
+            new_panel = DockablePanel(
+                new_parent, config, self.theme,
+                on_collapse=lambda p: self._on_panel_collapse(panel_id, p),
+                on_drag_start=lambda p: self._on_panel_drag_start(panel_id, p)
+            )
         
         # Restore collapsed state
         if was_collapsed:
@@ -1050,10 +1100,19 @@ class ResizableLayout(tk.Frame):
     
     def _save_panel_dock_state(self, panel_id: str, side: str):
         """Save panel dock state to settings."""
-        # Store in settings (we'll add panel_dock_states dict if needed)
+        # Store in settings
         if not hasattr(self.settings, 'panel_dock_states'):
             self.settings.panel_dock_states = {}
         self.settings.panel_dock_states[panel_id] = side
+        
+        # If floating, also save geometry
+        if side == "floating" and panel_id in self.floating_windows:
+            if not hasattr(self.settings, 'floating_panel_geometries'):
+                self.settings.floating_panel_geometries = {}
+            floating_window = self.floating_windows[panel_id]
+            if floating_window.winfo_exists():
+                geometry = floating_window.geometry()
+                self.settings.floating_panel_geometries[panel_id] = geometry
         
         # Save settings
         from replan.desktop.config import save_settings
