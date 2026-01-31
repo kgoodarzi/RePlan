@@ -7,6 +7,7 @@ adaptive behavior based on window size.
 
 import tkinter as tk
 from tkinter import ttk
+import sys
 from typing import Callable, Dict, Optional, List
 from dataclasses import dataclass
 
@@ -391,6 +392,36 @@ class ResizableLayout(tk.Frame):
         
         self._setup_structure()
         self._bind_resize()
+    
+    def _get_sash_pos(self, index: int):
+        """Get sash position for tk/ttk PanedWindow."""
+        try:
+            sashpos = getattr(self.paned, "sashpos", None)
+            if callable(sashpos):
+                return self.paned.sashpos(index)
+            # tk.PanedWindow fallback
+            coord = self.paned.sash_coord(index)
+            if coord:
+                return coord[0]
+        except Exception:
+            return None
+        return None
+    
+    def _set_sash_pos(self, index: int, pos: int) -> bool:
+        """Set sash position for tk/ttk PanedWindow."""
+        try:
+            sashpos = getattr(self.paned, "sashpos", None)
+            if callable(sashpos):
+                self.paned.sashpos(index, pos)
+                return True
+            # tk.PanedWindow fallback
+            coord = self.paned.sash_coord(index)
+            if coord:
+                self.paned.sash_place(index, pos, coord[1])
+                return True
+        except Exception:
+            return False
+        return False
         
     def _setup_structure(self):
         """Setup the main layout structure."""
@@ -582,6 +613,8 @@ class ResizableLayout(tk.Frame):
         # Bind to paned window sash movement to track panel width changes
         def on_sash_moved(event=None):
             """Save sidebar and center widths when sash is moved."""
+            if getattr(self, "_suppress_panel_resize", False):
+                return
             try:
                 paned_width = self.paned.winfo_width()
                 if paned_width <= 0:
@@ -594,7 +627,7 @@ class ResizableLayout(tk.Frame):
                 # Save left panel width (sash 0) if left panel exists
                 if left_panels:
                     try:
-                        sash0_pos = self.paned.sashpos(0)
+                        sash0_pos = self._get_sash_pos(0)
                         if sash0_pos > 50:
                             self._save_side_width("left", left_panels, sash0_pos)
                     except (tk.TclError, AttributeError, IndexError):
@@ -617,17 +650,27 @@ class ResizableLayout(tk.Frame):
                             sash_idx = 0
                         
                         if len(panes) >= 2:
-                            sash_pos = self.paned.sashpos(sash_idx)
+                            sash_pos = self._get_sash_pos(sash_idx)
                             object_viewer_width = paned_width - sash_pos
                             
                             if object_viewer_width > 50:
                                 self._save_side_width("right", right_panels, object_viewer_width)
+                                print(
+                                    f"OBJECT VIEWER RESIZE: window={paned_width}px "
+                                    f"sash={sash_pos}px object={object_viewer_width}px",
+                                    file=sys.stderr
+                                )
                     except (tk.TclError, AttributeError, IndexError):
                         # Fallback to winfo_width
                         try:
                             object_viewer_width = self.right_panel_frame.winfo_width()
                             if object_viewer_width > 50:
                                 self._save_side_width("right", right_panels, object_viewer_width)
+                                print(
+                                    f"OBJECT VIEWER RESIZE: window={paned_width}px "
+                                    f"object={object_viewer_width}px (fallback)",
+                                    file=sys.stderr
+                                )
                         except:
                             pass
             except Exception as e:

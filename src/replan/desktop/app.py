@@ -9717,6 +9717,8 @@ class RePlanApp:
         center_width = None
         sidebar_width_ratio = None
         center_width_ratio = None
+        object_panel_width = None
+        object_panel_width_ratio = None
         
         # Save panel dock states
         panel_dock_states = {}
@@ -9766,9 +9768,8 @@ class RePlanApp:
                     if left_index is not None and left_index == 0:
                         try:
                             # Check if sashpos method exists before calling
-                            sashpos_method = getattr(paned, 'sashpos', None)
-                            if callable(sashpos_method) and len(panes) >= 2:
-                                sash0_pos = paned.sashpos(0)
+                            if hasattr(self.layout, "_get_sash_pos") and len(panes) >= 2:
+                                sash0_pos = self.layout._get_sash_pos(0)
                                 if sash0_pos > 50:  # Reasonable minimum
                                     sidebar_width = sash0_pos
                                     sidebar_width_ratio = sash0_pos / paned_width if paned_width > 0 else None
@@ -9798,10 +9799,9 @@ class RePlanApp:
                     if center_index is not None and right_index is not None and center_index < right_index:
                         try:
                             # Check if sashpos method exists and we have enough panes
-                            sashpos_method = getattr(paned, 'sashpos', None)
-                            if callable(sashpos_method) and len(panes) >= 3:
-                                sash0_pos = paned.sashpos(0) if left_index is not None else 0
-                                sash1_pos = paned.sashpos(1)
+                            if hasattr(self.layout, "_get_sash_pos") and len(panes) >= 3:
+                                sash0_pos = self.layout._get_sash_pos(0) if left_index is not None else 0
+                                sash1_pos = self.layout._get_sash_pos(1)
                                 
                                 center_actual_width = sash1_pos - sash0_pos
                                 if center_actual_width > 100:  # Reasonable minimum
@@ -9831,7 +9831,14 @@ class RePlanApp:
                         object_viewer_width = right_panel_frame.winfo_width()
                         if object_viewer_width > 50:
                             self.settings.tree_width = object_viewer_width
-                            print(f"DEBUG: Saving object viewer width: {object_viewer_width}px")
+                            object_panel_width = object_viewer_width
+                            object_panel_width_ratio = object_viewer_width / paned_width if paned_width > 0 else None
+                            print(
+                                f"WORKSPACE SAVE: window={paned_width}px "
+                                f"sidebar={sidebar_width}px center={center_width}px "
+                                f"object={object_panel_width}px ratio={object_panel_width_ratio}",
+                                file=sys.stderr
+                            )
                     except:
                         pass
                             
@@ -9856,6 +9863,8 @@ class RePlanApp:
             "sidebar_width_ratio": sidebar_width_ratio,
             "center_width": center_width,
             "center_width_ratio": center_width_ratio,
+            "object_panel_width": object_panel_width,
+            "object_panel_width_ratio": object_panel_width_ratio,
             "tools_sections_state": tools_sections_state,
             "panel_dock_states": panel_dock_states,
         }
@@ -9864,6 +9873,13 @@ class RePlanApp:
         """Restore view state from loaded workspace."""
         if not view_state:
             return
+        print(
+            f"WORKSPACE LOAD START: has_view_state=True "
+            f"object_panel_width={view_state.get('object_panel_width')} "
+            f"object_panel_width_ratio={view_state.get('object_panel_width_ratio')} "
+            f"panel_dock_states={view_state.get('panel_dock_states')}",
+            file=sys.stderr
+        )
         
         # Restore zoom level
         self.zoom_level = view_state.get("zoom_level", 1.0)
@@ -9896,6 +9912,8 @@ class RePlanApp:
         sidebar_width_ratio = view_state.get("sidebar_width_ratio")
         center_width = view_state.get("center_width")
         center_width_ratio = view_state.get("center_width_ratio")
+        object_panel_width = view_state.get("object_panel_width")
+        object_panel_width_ratio = view_state.get("object_panel_width_ratio")
         
         # Support legacy format (object_panel_width) for backward compatibility
         if not sidebar_width and not center_width:
@@ -9906,7 +9924,7 @@ class RePlanApp:
                 sidebar_width = self.settings.sidebar_width
                 center_width = None  # Will be calculated
         
-        if should_restore_horizontal and (sidebar_width or sidebar_width_ratio or center_width or center_width_ratio):
+        if should_restore_horizontal and (sidebar_width or sidebar_width_ratio or center_width or center_width_ratio or object_panel_width or object_panel_width_ratio):
             if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
                 # Track restoration attempts
                 if not hasattr(self, '_panel_width_restore_attempts'):
@@ -9922,6 +9940,9 @@ class RePlanApp:
                             if self._panel_width_restore_attempts < max_attempts:
                                 self.root.after(200, restore_panel_widths)
                             return
+                        
+                        # Suppress resize tracking during restore
+                        setattr(self.layout, "_suppress_panel_resize", True)
                         
                         paned = self.layout.paned
                         left_panel_frame = self.layout.left_panel_frame
@@ -9986,28 +10007,21 @@ class RePlanApp:
                                         self.root.after(200, restore_panel_widths)
                                     return
                                 
-                                # Check if sashpos method exists - use getattr with default to avoid AttributeError
-                                try:
-                                    sashpos_method = getattr(paned, 'sashpos', None)
-                                    has_sash_method = callable(sashpos_method)
-                                except:
-                                    has_sash_method = False
+                                has_sash_method = hasattr(self.layout, "_set_sash_pos")
                                 
                                 if has_sash_method and num_panes >= 2:
                                     # Try to use sashpos method
-                                    try:
-                                        current_sash0 = paned.sashpos(0)
+                                    current_sash0 = self.layout._get_sash_pos(0)
+                                    if current_sash0 is None:
+                                        has_sash_method = False
+                                    else:
                                         if abs(current_sash0 - target_sidebar_width) > 5:
-                                            paned.sashpos(0, target_sidebar_width)
-                                            self.settings.sidebar_width = target_sidebar_width
-                                            print(f"DEBUG: Restored sidebar width to {target_sidebar_width}px (sash 0, window width {window_width})")
+                                            if self.layout._set_sash_pos(0, target_sidebar_width):
+                                                self.settings.sidebar_width = target_sidebar_width
+                                                print(f"DEBUG: Restored sidebar width to {target_sidebar_width}px (sash 0, window width {window_width})")
                                         else:
                                             self.settings.sidebar_width = target_sidebar_width
                                             print(f"DEBUG: Sidebar width already correct: {current_sash0}px")
-                                    except (tk.TclError, AttributeError, IndexError, TypeError) as e:
-                                        # sashpos not available, use fallback method
-                                        print(f"DEBUG: sashpos not available, using fallback: {e}")
-                                        has_sash_method = False
                                 
                                 # Fallback: Use winfo_width() on the actual frame
                                 if not has_sash_method:
@@ -10037,23 +10051,118 @@ class RePlanApp:
                             except Exception as e:
                                 print(f"DEBUG: Error restoring sidebar width: {e}")
                         
-                        # Restore center width (sash 1)
-                        if center_index is not None and right_index is not None and len(panes) >= 3:
+                        # Restore object viewer width (right sash) if available
+                        if right_index is not None:
+                            try:
+                                min_center_width = 400
+                                min_object_viewer = 200
+                                current_sash0 = target_sidebar_width if target_sidebar_width is not None else self.settings.sidebar_width
+                                
+                                has_sash_method = hasattr(self.layout, "_get_sash_pos")
+                                if has_sash_method and left_index is not None:
+                                    current_pos = self.layout._get_sash_pos(0)
+                                    if current_pos is not None:
+                                        current_sash0 = current_pos
+                                    else:
+                                        has_sash_method = False
+                                
+                                if object_panel_width_ratio and object_panel_width_ratio > 0:
+                                    target_object_width = int(window_width * object_panel_width_ratio)
+                                elif object_panel_width and object_panel_width > 0:
+                                    target_object_width = object_panel_width
+                                else:
+                                    target_object_width = self.settings.tree_width
+                                
+                                max_object_width = max(min_object_viewer, window_width - current_sash0 - min_center_width)
+                                target_object_width = max(min_object_viewer, min(target_object_width, max_object_width))
+                                
+                                if len(panes) >= 3:
+                                    target_sash = window_width - target_object_width
+                                    target_sash = max(current_sash0 + min_center_width, min(target_sash, window_width - min_object_viewer))
+                                    if has_sash_method:
+                                        if self.layout._set_sash_pos(1, target_sash):
+                                            self.settings.tree_width = window_width - target_sash
+                                            from replan.desktop.config import save_settings
+                                            save_settings(self.settings)
+                                            print(
+                                                f"WORKSPACE LOAD: window={window_width}px "
+                                                f"sidebar={current_sash0}px object={self.settings.tree_width}px "
+                                                f"target_object={target_object_width}px sash1={target_sash}",
+                                                file=sys.stderr
+                                            )
+                                    else:
+                                        try:
+                                            paned.paneconfigure(right_panel_frame, width=target_object_width)
+                                            self.settings.tree_width = target_object_width
+                                            from replan.desktop.config import save_settings
+                                            save_settings(self.settings)
+                                            print(
+                                                f"WORKSPACE LOAD: window={window_width}px "
+                                                f"object={self.settings.tree_width}px "
+                                                f"target_object={target_object_width}px (paneconfigure)",
+                                                file=sys.stderr
+                                            )
+                                            # Re-apply after layout settles
+                                            self.root.after(
+                                                500,
+                                                lambda w=target_object_width: paned.paneconfigure(right_panel_frame, width=w)
+                                            )
+                                        except Exception:
+                                            pass
+                                else:
+                                    # Only center/right panes exist; sash index is 0
+                                    target_sash = window_width - target_object_width
+                                    target_sash = max(min_center_width, min(target_sash, window_width - min_object_viewer))
+                                    if has_sash_method:
+                                        if self.layout._set_sash_pos(0, target_sash):
+                                            self.settings.tree_width = window_width - target_sash
+                                            from replan.desktop.config import save_settings
+                                            save_settings(self.settings)
+                                            print(
+                                                f"WORKSPACE LOAD: window={window_width}px "
+                                                f"center={target_sash}px object={self.settings.tree_width}px "
+                                                f"target_object={target_object_width}px sash0={target_sash}",
+                                                file=sys.stderr
+                                            )
+                                    else:
+                                        try:
+                                            paned.paneconfigure(right_panel_frame, width=target_object_width)
+                                            self.settings.tree_width = target_object_width
+                                            from replan.desktop.config import save_settings
+                                            save_settings(self.settings)
+                                            print(
+                                                f"WORKSPACE LOAD: window={window_width}px "
+                                                f"object={self.settings.tree_width}px "
+                                                f"target_object={target_object_width}px (paneconfigure)",
+                                                file=sys.stderr
+                                            )
+                                            # Re-apply after layout settles
+                                            self.root.after(
+                                                500,
+                                                lambda w=target_object_width: paned.paneconfigure(right_panel_frame, width=w)
+                                            )
+                                        except Exception:
+                                            pass
+                            except Exception as e:
+                                print(f"DEBUG: Error restoring object viewer width: {e}")
+                        
+                        # Re-enable resize tracking after layout settles
+                        self.root.after(1500, lambda: setattr(self.layout, "_suppress_panel_resize", False))
+                        
+                        # Restore center width (sash 1) only if object width isn't specified
+                        if (not object_panel_width and not object_panel_width_ratio) and center_index is not None and right_index is not None and len(panes) >= 3:
                             try:
                                 # Get current sidebar width (sash 0)
                                 current_sash0 = target_sidebar_width if target_sidebar_width is not None else self.settings.sidebar_width
                                 
                                 # Try to get actual sash position if available
-                                try:
-                                    sashpos_method = getattr(paned, 'sashpos', None)
-                                    has_sash_method = callable(sashpos_method)
-                                    if has_sash_method:
-                                        try:
-                                            current_sash0 = paned.sashpos(0)
-                                        except (tk.TclError, AttributeError, IndexError, TypeError):
-                                            pass  # Use the calculated value
-                                except:
-                                    has_sash_method = False
+                                has_sash_method = hasattr(self.layout, "_get_sash_pos")
+                                if has_sash_method:
+                                    current_pos = self.layout._get_sash_pos(0)
+                                    if current_pos is not None:
+                                        current_sash0 = current_pos
+                                    else:
+                                        has_sash_method = False
                                 
                                 # Calculate target center width
                                 if center_width_ratio and center_width_ratio > 0:
@@ -10076,21 +10185,19 @@ class RePlanApp:
                                 target_sash1 = max(current_sash0 + min_center_width, min(target_sash1, window_width - min_object_viewer))
                                 
                                 # Set sash 1 position
-                                try:
-                                    sashpos_method = getattr(paned, 'sashpos', None)
-                                    has_sash_method = callable(sashpos_method)
-                                except:
-                                    has_sash_method = False
+                                has_sash_method = hasattr(self.layout, "_set_sash_pos")
                                 
                                 if has_sash_method:
-                                    try:
-                                        current_sash1 = paned.sashpos(1)
+                                    current_sash1 = self.layout._get_sash_pos(1)
+                                    if current_sash1 is None:
+                                        has_sash_method = False
+                                    else:
                                         if abs(current_sash1 - target_sash1) > 5:
-                                            paned.sashpos(1, target_sash1)
-                                            # Object viewer width is automatically: window_width - target_sash1
-                                            object_viewer_width = window_width - target_sash1
-                                            self.settings.tree_width = object_viewer_width
-                                            print(f"DEBUG: Restored center width to {target_center_width}px (sash 1 at {target_sash1}, object viewer: {object_viewer_width}px)")
+                                            if self.layout._set_sash_pos(1, target_sash1):
+                                                # Object viewer width is automatically: window_width - target_sash1
+                                                object_viewer_width = window_width - target_sash1
+                                                self.settings.tree_width = object_viewer_width
+                                                print(f"DEBUG: Restored center width to {target_center_width}px (sash 1 at {target_sash1}, object viewer: {object_viewer_width}px)")
                                         else:
                                             object_viewer_width = window_width - current_sash1
                                             self.settings.tree_width = object_viewer_width
@@ -10099,16 +10206,6 @@ class RePlanApp:
                                         # Save settings
                                         from replan.desktop.config import save_settings
                                         save_settings(self.settings)
-                                        
-                                    except (tk.TclError, AttributeError, IndexError, TypeError) as e:
-                                        print(f"DEBUG: Could not set sash 1: {e}, using fallback")
-                                        # Fallback: Calculate object viewer width from remaining space
-                                        object_viewer_width = window_width - current_sash0 - target_center_width
-                                        if object_viewer_width > 50:
-                                            self.settings.tree_width = object_viewer_width
-                                            from replan.desktop.config import save_settings
-                                            save_settings(self.settings)
-                                            print(f"DEBUG: Set object viewer width via fallback: {object_viewer_width}px")
                                 else:
                                     # No sashpos method - use fallback
                                     object_viewer_width = window_width - current_sash0 - target_center_width
