@@ -89,6 +89,7 @@ Thumbs.db
 
 # Project specific
 *.pmw
+!samples/**/*.pmw
 output/
 debug_output/
 *.png

@@ -7,7 +7,6 @@ adaptive behavior based on window size.
 
 import tkinter as tk
 from tkinter import ttk
-import sys
 from typing import Callable, Dict, Optional, List
 from dataclasses import dataclass
 
@@ -655,22 +654,12 @@ class ResizableLayout(tk.Frame):
                             
                             if object_viewer_width > 50:
                                 self._save_side_width("right", right_panels, object_viewer_width)
-                                print(
-                                    f"OBJECT VIEWER RESIZE: window={paned_width}px "
-                                    f"sash={sash_pos}px object={object_viewer_width}px",
-                                    file=sys.stderr
-                                )
                     except (tk.TclError, AttributeError, IndexError):
                         # Fallback to winfo_width
                         try:
                             object_viewer_width = self.right_panel_frame.winfo_width()
                             if object_viewer_width > 50:
                                 self._save_side_width("right", right_panels, object_viewer_width)
-                                print(
-                                    f"OBJECT VIEWER RESIZE: window={paned_width}px "
-                                    f"object={object_viewer_width}px (fallback)",
-                                    file=sys.stderr
-                                )
                         except:
                             pass
             except Exception as e:

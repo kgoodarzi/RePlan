@@ -9833,12 +9833,7 @@ class RePlanApp:
                             self.settings.tree_width = object_viewer_width
                             object_panel_width = object_viewer_width
                             object_panel_width_ratio = object_viewer_width / paned_width if paned_width > 0 else None
-                            print(
-                                f"WORKSPACE SAVE: window={paned_width}px "
-                                f"sidebar={sidebar_width}px center={center_width}px "
-                                f"object={object_panel_width}px ratio={object_panel_width_ratio}",
-                                file=sys.stderr
-                            )
+                            pass
                     except:
                         pass
                             
@@ -9873,13 +9868,7 @@ class RePlanApp:
         """Restore view state from loaded workspace."""
         if not view_state:
             return
-        print(
-            f"WORKSPACE LOAD START: has_view_state=True "
-            f"object_panel_width={view_state.get('object_panel_width')} "
-            f"object_panel_width_ratio={view_state.get('object_panel_width_ratio')} "
-            f"panel_dock_states={view_state.get('panel_dock_states')}",
-            file=sys.stderr
-        )
+        pass
         
         # Restore zoom level
         self.zoom_level = view_state.get("zoom_level", 1.0)
@@ -10084,24 +10073,12 @@ class RePlanApp:
                                             self.settings.tree_width = window_width - target_sash
                                             from replan.desktop.config import save_settings
                                             save_settings(self.settings)
-                                            print(
-                                                f"WORKSPACE LOAD: window={window_width}px "
-                                                f"sidebar={current_sash0}px object={self.settings.tree_width}px "
-                                                f"target_object={target_object_width}px sash1={target_sash}",
-                                                file=sys.stderr
-                                            )
                                     else:
                                         try:
                                             paned.paneconfigure(right_panel_frame, width=target_object_width)
                                             self.settings.tree_width = target_object_width
                                             from replan.desktop.config import save_settings
                                             save_settings(self.settings)
-                                            print(
-                                                f"WORKSPACE LOAD: window={window_width}px "
-                                                f"object={self.settings.tree_width}px "
-                                                f"target_object={target_object_width}px (paneconfigure)",
-                                                file=sys.stderr
-                                            )
                                             # Re-apply after layout settles
                                             self.root.after(
                                                 500,
@@ -10118,24 +10095,12 @@ class RePlanApp:
                                             self.settings.tree_width = window_width - target_sash
                                             from replan.desktop.config import save_settings
                                             save_settings(self.settings)
-                                            print(
-                                                f"WORKSPACE LOAD: window={window_width}px "
-                                                f"center={target_sash}px object={self.settings.tree_width}px "
-                                                f"target_object={target_object_width}px sash0={target_sash}",
-                                                file=sys.stderr
-                                            )
                                     else:
                                         try:
                                             paned.paneconfigure(right_panel_frame, width=target_object_width)
                                             self.settings.tree_width = target_object_width
                                             from replan.desktop.config import save_settings
                                             save_settings(self.settings)
-                                            print(
-                                                f"WORKSPACE LOAD: window={window_width}px "
-                                                f"object={self.settings.tree_width}px "
-                                                f"target_object={target_object_width}px (paneconfigure)",
-                                                file=sys.stderr
-                                            )
                                             # Re-apply after layout settles
                                             self.root.after(
                                                 500,
